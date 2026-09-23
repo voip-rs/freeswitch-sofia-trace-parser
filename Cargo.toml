@@ -1,6 +1,6 @@
 [package]
 name = "freeswitch-sofia-trace-parser"
-version = "0.10.1"
+version = "0.11.0"
 edition = "2021"
 license = "LGPL-2.1-or-later"
 authors = ["Jérôme Poulin <jeromepoulin@gmail.com>"]
