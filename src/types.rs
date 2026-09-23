@@ -549,6 +549,8 @@ pub struct Frame {
     pub timestamp: Timestamp,
     /// Raw frame payload.
     pub content: Vec<u8>,
+    /// Byte position of this frame's header in the stream the iterator read.
+    pub offset: u64,
 }
 
 impl Frame {
@@ -588,6 +590,9 @@ pub struct SipMessage {
     pub content: Vec<u8>,
     /// Number of Level 1 frames that were reassembled into this message.
     pub frame_count: usize,
+    /// Byte position of this message's first frame, the frame `timestamp` also
+    /// comes from.
+    pub offset: u64,
 }
 
 impl SipMessage {
@@ -732,6 +737,9 @@ pub struct ParsedSipMessage {
     pub body: Vec<u8>,
     /// Number of Level 1 frames that were reassembled into this message.
     pub frame_count: usize,
+    /// Byte position of this message's first frame, the frame `timestamp` also
+    /// comes from.
+    pub offset: u64,
 }
 
 /// A `message/sipfrag` body (RFC 3420): any prefix of a SIP message.
@@ -914,6 +922,7 @@ mod tests {
             ),
             body: body.to_vec(),
             frame_count: 1,
+            offset: 0,
         }
     }
 
@@ -930,6 +939,7 @@ mod tests {
                 usec: 0,
             },
             content: Vec::new(),
+            offset: 0,
         }
     }
 
@@ -946,6 +956,7 @@ mod tests {
             },
             content: Vec::new(),
             frame_count: 1,
+            offset: 0,
         }
     }
 

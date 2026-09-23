@@ -606,7 +606,11 @@ impl<R: Read> FrameIterator<R> {
     }
 
     /// Read one frame's content, from the header's end to the frame boundary.
-    fn read_content(&mut self, header: FrameHeader) -> Option<Result<Frame, ParseError>> {
+    fn read_content(
+        &mut self,
+        header: FrameHeader,
+        offset: u64,
+    ) -> Option<Result<Frame, ParseError>> {
         let FrameHeader {
             direction,
             byte_count,
@@ -726,6 +730,7 @@ impl<R: Read> FrameIterator<R> {
             address,
             timestamp,
             content,
+            offset,
         }))
     }
 }
@@ -734,7 +739,7 @@ impl<R: Read> Iterator for FrameIterator<R> {
     type Item = Result<Frame, ParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let header = loop {
+        let (header, start) = loop {
             if self.buf.is_empty() && !self.eof {
                 if let Err(e) = self.fill_buf() {
                     return Some(Err(ParseError::Io(e)));
@@ -757,15 +762,18 @@ impl<R: Read> Iterator for FrameIterator<R> {
                 continue;
             }
 
+            // Before the header is consumed: buf[0] sits at this offset, so a
+            // frame's position is its header's, not its content's.
+            let start = self.offset;
             match self.read_header() {
-                HeaderStep::Got(header) => break header,
+                HeaderStep::Got(header) => break (header, start),
                 HeaderStep::Restart => continue,
                 HeaderStep::End => return None,
                 HeaderStep::Failed(e) => return Some(Err(e)),
             }
         };
 
-        self.read_content(header)
+        self.read_content(header, start)
     }
 }
 
@@ -902,6 +910,53 @@ mod tests {
         assert_eq!(frames[0].direction, Direction::Recv);
         assert_eq!(frames[1].content, b"world");
         assert_eq!(frames[1].direction, Direction::Sent);
+    }
+
+    /// A frame's offset is where its header begins, so a caller chaining two
+    /// sources can say which one a frame came out of.
+    #[test]
+    fn frame_iterator_states_where_each_frame_began() {
+        let first = b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n";
+        let second = b"sent 5 bytes to tcp/1.1.1.1:5060 at 00:00:00.000001:\nworld\x0B\n";
+        let mut data = first.to_vec();
+        data.extend_from_slice(second);
+
+        let frames: Vec<Frame> = FrameIterator::new(&data[..])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(frames[0].offset, 0);
+        assert_eq!(frames[1].offset, first.len() as u64);
+    }
+
+    /// The reader's chunking is not the frame's: a source handing back one byte
+    /// per call must not move where a frame is reported to start.
+    #[test]
+    fn a_short_reader_does_not_move_a_frame_offset() {
+        struct OneByteAtATime<'a>(&'a [u8]);
+        impl std::io::Read for OneByteAtATime<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                match (self.0.first(), buf.is_empty()) {
+                    (Some(&b), false) => {
+                        buf[0] = b;
+                        self.0 = &self.0[1..];
+                        Ok(1)
+                    }
+                    _ => Ok(0),
+                }
+            }
+        }
+
+        let first = b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n";
+        let mut data = first.to_vec();
+        data.extend_from_slice(
+            b"sent 5 bytes to tcp/1.1.1.1:5060 at 00:00:00.000001:\nworld\x0B\n",
+        );
+
+        let frames: Vec<Frame> = FrameIterator::new(OneByteAtATime(&data))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(frames[0].offset, 0);
+        assert_eq!(frames[1].offset, first.len() as u64);
     }
 
     #[test]

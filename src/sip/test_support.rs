@@ -13,6 +13,7 @@ pub(crate) fn make_sip_message(content: &[u8]) -> SipMessage {
         },
         content: content.to_vec(),
         frame_count: 1,
+        offset: 0,
     }
 }
 

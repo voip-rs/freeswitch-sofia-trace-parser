@@ -52,6 +52,7 @@ struct ConnectionKey {
 struct ConnectionBuffer {
     transport: Transport,
     timestamp: Timestamp,
+    offset: u64,
     content: Vec<u8>,
     frame_count: usize,
     last_seen: u64,
@@ -182,6 +183,7 @@ impl<R: std::io::Read> Iterator for MessageIterator<R> {
                             address: frame.address,
                             timestamp: frame.timestamp,
                             content: frame.content,
+                            offset: frame.offset,
                             frame_count: 1,
                         }));
                     }
@@ -201,6 +203,7 @@ impl<R: std::io::Read> Iterator for MessageIterator<R> {
                         None => self.buffers.entry(key.clone()).or_insert(ConnectionBuffer {
                             transport: frame.transport,
                             timestamp: frame.timestamp,
+                            offset: frame.offset,
                             content: Vec::new(),
                             frame_count: 0,
                             last_seen: now,
@@ -211,6 +214,7 @@ impl<R: std::io::Read> Iterator for MessageIterator<R> {
 
                     if buf.content.is_empty() {
                         buf.timestamp = frame.timestamp;
+                        buf.offset = frame.offset;
                     }
 
                     trace!(
@@ -402,6 +406,7 @@ fn message(
         transport: buf.transport,
         address: key.address.clone(),
         timestamp: buf.timestamp,
+        offset: buf.offset,
         content,
         frame_count,
     }
@@ -509,6 +514,7 @@ mod tests {
             },
             content,
             frame_count: 1,
+            offset: 0,
             last_seen: 0,
         }
     }
@@ -569,6 +575,44 @@ mod tests {
         expected.extend_from_slice(part1);
         expected.extend_from_slice(part2);
         assert_eq!(msgs[0].content, expected);
+    }
+
+    /// A reassembled message reports its first frame's position, the frame its
+    /// timestamp also comes from.
+    #[test]
+    fn a_reassembled_message_reports_its_first_frame() {
+        let lead = make_frame(
+            Direction::Recv,
+            Transport::Tcp,
+            "[::1]:5060",
+            b"OPTIONS sip:user@host SIP/2.0\r\nContent-Length: 0\r\n\r\n",
+        );
+        let part1 = b"NOTIFY sip:user@host SIP/2.0\r\n";
+        let part2 = b"Content-Length: 0\r\n\r\n";
+        let mut data = lead.clone();
+        data.extend_from_slice(&make_frame(
+            Direction::Recv,
+            Transport::Tcp,
+            "[::1]:5060",
+            part1,
+        ));
+        data.extend_from_slice(&make_frame(
+            Direction::Recv,
+            Transport::Tcp,
+            "[::1]:5060",
+            part2,
+        ));
+
+        let msgs: Vec<SipMessage> = MessageIterator::new(&data[..])
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].offset, 0);
+        assert_eq!(
+            msgs[1].offset,
+            lead.len() as u64,
+            "the NOTIFY spans two frames and begins at the first of them"
+        );
     }
 
     #[test]

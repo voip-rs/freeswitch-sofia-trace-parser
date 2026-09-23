@@ -591,6 +591,7 @@ mod tests {
                 usec: 0,
             },
             content: payload.to_vec(),
+            offset: 0,
         }
     }
 
@@ -726,6 +727,7 @@ mod tests {
         let f = Frame {
             direction: Direction::Recv,
             byte_count: 1,
+            offset: 0,
             transport: Transport::Udp,
             address: "10.0.0.1:5060".into(),
             timestamp: Timestamp::TimeOnly {
@@ -908,6 +910,7 @@ mod tests {
                 .collect(),
             body: body.to_vec(),
             frame_count: 1,
+            offset: 0,
         }
     }
 
@@ -947,6 +950,7 @@ mod tests {
             },
             content: payload.to_vec(),
             frame_count: 1,
+            offset: 0,
         })
         .unwrap();
         let from_message = wm.into_inner();

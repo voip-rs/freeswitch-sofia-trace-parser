@@ -100,6 +100,24 @@ The solution uses byte_count as the primary signal:
 Production validation: zero byte_count mismatches across 6.9M+ frames in
 83 dump files (~12GB). The primary path handles 100% of real-world data.
 
+## Every Level Reports Where Its Record Began
+
+Each frame, message and parsed message carries the byte position it started
+at, against the stream the iterator consumed — the same origin the
+unparsed-region records use. The position is the header's, not the content's,
+and not the reader's: a source handing back one byte per call reports the
+offsets of one handing back the whole file.
+
+A reassembled message takes its first frame's offset, the frame its timestamp
+also comes from, so the two agree about which part of the stream the message
+belongs to. A read pulls whatever the socket had queued, so one frame can
+carry several messages; each reports that frame's position, as each already
+shares its timestamp. One frame bounds that approximation.
+
+The offset rides on the value rather than being asked of the iterator,
+because the two diverge: buffering and reassembly put the reader arbitrarily
+far past the bytes that produced the message being emitted.
+
 ## Per-Connection TCP Buffering
 
 The initial Level 2 implementation used naive consecutive-frame grouping:

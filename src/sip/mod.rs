@@ -310,6 +310,7 @@ fn parse_sip_content(msg: &SipMessage, content: &[u8]) -> Result<ParsedSipMessag
         transport: msg.transport,
         address: msg.address.clone(),
         timestamp: msg.timestamp,
+        offset: msg.offset,
         message_type,
         headers,
         body: body.to_vec(),
@@ -687,6 +688,7 @@ mod tests {
                 usec: 123456,
             },
             content: content.to_vec(),
+            offset: 0,
             frame_count: 3,
         };
         let parsed = msg.parse().unwrap();
@@ -841,6 +843,7 @@ mod tests {
                     usec: 0,
                 },
                 content: content.to_vec(),
+                offset: 0,
                 frame_count: 1,
             };
             let err = msg.parse().unwrap_err();
