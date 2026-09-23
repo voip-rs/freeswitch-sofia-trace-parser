@@ -32,17 +32,4 @@ if ! bash -c 'cargo test --lib --features cli --bin freeswitch-sofia-trace-parse
     exit 1
 fi
 
-# Not git describe: a release tag sits on a Cargo.lock-pinning child commit that
-# is never an ancestor of master, so describe would never see one.
-latest_tag=$(git tag --list 'v*' --sort=-v:refname | head -1)
-if [ -n "$latest_tag" ]; then
-    echo "Running cargo semver-checks against $latest_tag..."
-    if ! cargo semver-checks --baseline-rev "$latest_tag"; then
-        echo "Semver check failed. Bump the version if this is an intentional breaking change."
-        exit 1
-    fi
-else
-    echo "No version tag found, skipping semver-checks."
-fi
-
 echo "Pre-commit checks passed"

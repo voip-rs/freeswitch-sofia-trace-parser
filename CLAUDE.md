@@ -31,7 +31,8 @@ This is a **library-first** crate. `src/bin/main.rs` is a sample (but complete) 
 ## Build & Test Workflow
 
 **Always run `cargo fmt` before every commit.** The pre-commit hook enforces
-formatting, clippy, gitleaks, tests, and semver-checks.
+formatting, clippy, gitleaks and tests. Semver is a release gate, not a commit
+gate: `scripts/pre-release.sh` runs it.
 
 ```sh
 cargo fmt

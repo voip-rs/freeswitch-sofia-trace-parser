@@ -37,17 +37,19 @@ If `samples/` is present it also runs the three
 `cargo test --release --manifest-path torture/Cargo.toml`; otherwise it
 prints one line noting they were skipped, which is not a release blocker.
 
-The hook runs semver-checks with cargo's default feature heuristic, and that
-is the gate — there is no `--only-explicit-features` here, since that flag
-sees an empty explicit-feature set and hides the `pcap`/`cli` API entirely.
+Semver is checked here and nowhere else — a breaking change is a release
+decision, not something a commit can be rejected for. It runs with cargo's
+default feature heuristic; there is no `--only-explicit-features`, since that
+flag sees an empty explicit-feature set and hides the `pcap`/`cli` API
+entirely.
 
 `eido` lives in the standalone `torture/` crate (see
 `docs/design-rationale.md`, "Torture Corpus Outside the Package"), not in
 this package's manifest, so it plays no part in publishing.
 
-The `pre-commit` hook re-runs fmt, clippy, rustdoc coverage, tests and
-semver-checks on the release commit, so it is the gate — `scripts/pre-release.sh`
-only front-loads the failures.
+The `pre-commit` hook re-runs fmt, clippy, rustdoc coverage and tests on the
+release commit, so `scripts/pre-release.sh` front-loads those failures and is
+itself the only place semver is checked.
 
 ## Steps
 
