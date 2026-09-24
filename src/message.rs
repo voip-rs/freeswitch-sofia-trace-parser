@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace};
 
 use crate::finders::{CRLF, CRLFCRLF};
 use crate::frame::{FrameIterator, ParseError};
@@ -126,7 +126,7 @@ impl<R: std::io::Read> MessageIterator<R> {
             let stats = self.frames.stats_mut();
             stats.stale_evictions += incomplete as u64;
             stats.stale_evicted_bytes += pending_bytes as u64;
-            warn!(
+            info!(
                 buffers = incomplete,
                 pending_bytes,
                 connections = %dropped.join(", "),

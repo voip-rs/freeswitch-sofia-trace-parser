@@ -318,10 +318,9 @@ Rules that emerged from production use:
   major-version bump becomes a semver break if its types leak into the
   public API. All public signatures use standard library types.
 
-- **Errors are returned, not logged.** The library uses `tracing` for
-  diagnostic messages (warn for unexpected conditions, debug for
-  expected artifacts), but never swallows errors. The caller decides
-  policy.
+- **Loss reaches the caller, never only the log.** Every loss is a
+  returned error or a parse-statistics count, so the library logs a
+  counted loss at info or below.
 
 ## Memory Profile
 
