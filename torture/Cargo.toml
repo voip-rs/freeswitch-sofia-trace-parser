@@ -11,5 +11,4 @@ rayon = "1"
 
 [dev-dependencies]
 eido = { git = "https://gitlab.cauca.ca/cauca-public/eido", features = ["xml"] }
-sip-uri = "0.2"
-sip-header = "0.3"
+sip-header = "1.0.0-beta.1"

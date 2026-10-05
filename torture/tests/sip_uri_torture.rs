@@ -4,8 +4,8 @@ use std::path::Path;
 use freeswitch_sofia_trace_parser::types::SipMessageType;
 use freeswitch_sofia_trace_parser::ParsedMessageIterator;
 use freeswitch_sofia_trace_torture::{Corpus, Stats};
-use sip_header::SipHeaderAddr;
-use sip_uri::Uri;
+use sip_header::sip_uri::{Uri, UriParse};
+use sip_header::{HeaderParse, SipHeaderAddr};
 
 const NAMEADDR_HEADERS: &[&str] = &[
     "from",
@@ -59,12 +59,15 @@ impl Stats for UriStats {
 
 impl UriStats {
     fn record_uri_type(&mut self, uri: &Uri) {
-        *self.by_scheme.entry(uri.scheme().to_string()).or_default() += 1;
+        *self
+            .by_scheme
+            .entry(uri.scheme().unwrap_or("(none)").to_string())
+            .or_default() += 1;
     }
 
     fn record_request_uri(&mut self, uri: &str, file: &str) {
         self.request_uri_total += 1;
-        match uri.parse::<Uri>() {
+        match Uri::parse(uri) {
             Ok(parsed) => {
                 self.request_uri_ok += 1;
                 self.record_uri_type(&parsed);
@@ -88,7 +91,7 @@ impl UriStats {
             .entry(header.to_lowercase())
             .or_insert((0, 0));
         entry.1 += 1;
-        match value.parse::<SipHeaderAddr>() {
+        match SipHeaderAddr::parse(value) {
             Ok(parsed) => {
                 self.nameaddr_ok += 1;
                 entry.0 += 1;

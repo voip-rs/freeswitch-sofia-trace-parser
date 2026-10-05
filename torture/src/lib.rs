@@ -1,4 +1,4 @@
-//! Torture-corpus runner shared by the URI and PIDF torture tests.
+//! Torture-corpus runner shared by the URI, PIDF and sip-header corpus tests.
 //!
 //! This crate exists outside the parser's own workspace so that its
 //! `eido` dependency (a git dependency with no crates.io release) never

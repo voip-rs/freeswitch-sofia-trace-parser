@@ -126,7 +126,9 @@ cargo test --release --test level1_samples per_file_frame_parsing -- --nocapture
 
 ### Torture tests (`torture/`)
 
-The sip-uri and PIDF-LO URI-parsing torture runs live in a standalone
+The sip-uri and PIDF-LO URI-parsing torture runs, and the sip-header corpus
+gate (every typed header and Request-URI: warnings, spans, strict round trip;
+counts only), live in a standalone
 `freeswitch-sofia-trace-torture` crate outside this package (see
 `docs/design-rationale.md`, "Torture Corpus Outside the Package"), since
 their `eido` dependency has no crates.io release. Run with:
