@@ -380,6 +380,30 @@ fn multipart_truncated_trailing_part() {
 }
 
 #[test]
+fn headerless_part_with_colon_keeps_its_bytes() {
+    for raw in [&b"<sip:a@example.com>"[..], b"{\"k\":1}"] {
+        let mut body = b"--b\r\n".to_vec();
+        body.extend_from_slice(raw);
+        body.extend_from_slice(b"\r\n--b--");
+        let parts = split_on_b("hdrless-colon", &body);
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].headers.is_empty());
+        assert_eq!(parts[0].body, raw);
+    }
+}
+
+#[test]
+fn headerless_part_with_blank_line_keeps_its_bytes() {
+    let parts = split_on_b(
+        "hdrless-blank",
+        b"--b\r\n<sip:a@example.com>\r\n\r\nmore\r\n--b--",
+    );
+    assert_eq!(parts.len(), 1);
+    assert!(parts[0].headers.is_empty());
+    assert_eq!(parts[0].body, b"<sip:a@example.com>\r\n\r\nmore");
+}
+
+#[test]
 fn multipart_truncated_inside_close_delimiter() {
     let parts = split_on_b(
         "trunc-close",
