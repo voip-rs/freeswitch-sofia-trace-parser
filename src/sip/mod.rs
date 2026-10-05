@@ -319,7 +319,13 @@ fn parse_sip_content(msg: &SipMessage, content: &[u8]) -> Result<ParsedSipMessag
 }
 
 pub(crate) fn parse_headers(data: &[u8]) -> Headers {
-    Headers::from(extract_all_headers(&bytes_to_str(data)))
+    Headers::from(
+        extract_all_headers(&bytes_to_str(data))
+            .headers
+            .into_iter()
+            .map(|(name, value)| (name.into_owned(), value.into_owned()))
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// Split at the first blank line, under the rule `sip_header` reads headers by:
@@ -801,9 +807,7 @@ mod tests {
             \r\n";
         let msg = make_sip_message(content);
         let parsed = msg.parse().unwrap();
-
-        // Leading whitespace should be trimmed, trailing kept (we only trim leading)
-        assert_eq!(parsed.call_id(), Some("spaces-around   "));
+        assert_eq!(parsed.call_id(), Some("spaces-around"));
     }
 
     #[test]

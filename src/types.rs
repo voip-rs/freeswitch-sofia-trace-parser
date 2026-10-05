@@ -8,7 +8,7 @@ pub(crate) fn expand_compact(name: &str) -> Option<&'static str> {
     let [ch] = name.as_bytes() else {
         return None;
     };
-    sip_header::SipHeader::from_compact(*ch).map(|header| header.as_str())
+    sip_header::SipHeader::from_compact(char::from(*ch)).map(|header| header.as_str())
 }
 
 /// Value recorded under `name` or under the compact form that expands to it,
