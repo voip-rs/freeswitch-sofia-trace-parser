@@ -2,9 +2,9 @@ use std::borrow::Cow;
 
 use memchr::memmem;
 
-use crate::finders::{CRLF, CRLFCRLF};
+use crate::finders::CRLFCRLF;
 use crate::sip::content_type::{canonical_body_header, extract_boundary, normalize_media_type};
-use crate::sip::{parse_headers, HasHeaders};
+use crate::sip::{header_block, HasHeaders};
 use crate::types::{Headers, MimePart, ParsedSipMessage};
 
 #[cfg(test)]
@@ -234,32 +234,20 @@ fn parse_multipart_body(body: &[u8], boundary: &str) -> Vec<MimePart> {
 }
 
 fn parse_mime_part(data: &[u8]) -> MimePart {
-    match CRLFCRLF.find(data) {
-        Some(pos) => {
-            let header_bytes = &data[..pos];
-            let body = &data[pos + 4..];
-            let headers = parse_headers(header_bytes);
-            MimePart {
-                headers,
-                body: body.to_vec(),
-            }
-        }
-        None => {
-            // Could be headers-only or body-only.
-            // If first line has a colon, treat as headers with no body.
-            let first_line_end = CRLF.find(data).unwrap_or(data.len());
-            if memchr::memchr(b':', &data[..first_line_end]).is_some() {
-                let headers = parse_headers(data);
-                MimePart {
-                    headers,
-                    body: Vec::new(),
-                }
-            } else {
-                MimePart {
-                    headers: Headers::default(),
-                    body: data.to_vec(),
-                }
-            }
-        }
+    let (header_bytes, body) = match CRLFCRLF.find(data) {
+        Some(pos) => (&data[..pos], &data[pos + 4..]),
+        None => (data, &[][..]),
+    };
+    let (headers, skipped) = header_block(header_bytes);
+    // A first line that is no header line means the part has no headers.
+    if skipped.first() == Some(&0) {
+        return MimePart {
+            headers: Headers::default(),
+            body: data.to_vec(),
+        };
+    }
+    MimePart {
+        headers,
+        body: body.to_vec(),
     }
 }
