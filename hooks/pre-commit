@@ -27,7 +27,7 @@ if ! doc_output=$(RUSTDOCFLAGS="-D missing_docs -D rustdoc::broken_intra_doc_lin
 fi
 
 echo "Running tests..."
-if ! bash -c 'cargo test --lib --features cli --bin freeswitch-sofia-trace-parser 2>&1 | grep "^test result:"'; then
+if ! bash -o pipefail -c 'cargo test --lib --features cli --bin freeswitch-sofia-trace-parser 2>&1 | grep "^test result:"'; then
     echo "Tests failed. Fix them before committing."
     exit 1
 fi
