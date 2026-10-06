@@ -15,7 +15,11 @@ cargo test --release --features cli --bin freeswitch-sofia-trace-parser
 last_tag=$(git tag --list 'v*' --sort=-v:refname | head -1)
 cargo semver-checks --baseline-rev "$last_tag"
 
-cargo publish --dry-run
+# The version bump stays uncommitted until tag-release.sh; any other change,
+# untracked files included, still makes publish refuse.
+allow_dirty=()
+[ "$(git status --porcelain)" = " M Cargo.toml" ] && allow_dirty=(--allow-dirty)
+cargo publish --dry-run "${allow_dirty[@]}"
 
 if [ -d samples ]; then
 	cargo test --release --test level1_samples
