@@ -404,6 +404,30 @@ fn headerless_part_with_blank_line_keeps_its_bytes() {
 }
 
 #[test]
+fn part_with_malformed_first_header_name_keeps_its_bytes() {
+    let raw = b"Content Type: application/sdp\r\n\r\nv=0";
+    let mut body = b"--b\r\n".to_vec();
+    body.extend_from_slice(raw);
+    body.extend_from_slice(b"\r\n--b--");
+    let parts = split_on_b("bad-first-name", &body);
+    assert_eq!(parts.len(), 1);
+    assert!(parts[0].headers.is_empty());
+    assert_eq!(parts[0].body, raw);
+}
+
+#[test]
+fn malformed_later_header_name_keeps_the_part_headers() {
+    let parts = split_on_b(
+        "bad-later-name",
+        b"--b\r\nContent-Type: application/sdp\r\nX Bad: 1\r\n\r\nv=0\r\n--b--",
+    );
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0].content_type(), Some("application/sdp"));
+    assert_eq!(parts[0].header_value("X Bad"), Some("1"));
+    assert_eq!(parts[0].body, b"v=0");
+}
+
+#[test]
 fn multipart_truncated_inside_close_delimiter() {
     let parts = split_on_b(
         "trunc-close",

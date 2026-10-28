@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use memchr::memmem;
+use sip_header::Field;
 
 use crate::finders::CRLFCRLF;
 use crate::sip::content_type::{canonical_body_header, extract_boundary, normalize_media_type};
@@ -238,9 +239,12 @@ fn parse_mime_part(data: &[u8]) -> MimePart {
         Some(pos) => (&data[..pos], &data[pos + 4..]),
         None => (data, &[][..]),
     };
-    let (headers, skipped) = header_block(header_bytes);
-    // A first line that is no header line means the part has no headers.
-    if skipped.first() == Some(&0) {
+    let (headers, skipped, warnings) = header_block(header_bytes);
+    // A first line that is no clean header line means the part has no headers.
+    let name_breach_at_start = warnings
+        .iter()
+        .any(|w| w.field == Field::Name && w.span().is_some_and(|s| s.range().start == 0));
+    if skipped.first() == Some(&0) || name_breach_at_start {
         return MimePart {
             headers: Headers::default(),
             body: data.to_vec(),

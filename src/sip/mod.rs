@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use sip_header::{extract_header_block, ExtractedHeaders};
+use sip_header::{extract_header_block, ParseWarning};
 
 use crate::finders::CRLF;
 use crate::frame::ParseError;
@@ -322,15 +322,16 @@ pub(crate) fn parse_headers(data: &[u8]) -> Headers {
     header_block(data).0
 }
 
-/// The rows of a header block with no start line, and the byte offsets of
-/// the lines that are not rows.
-pub(crate) fn header_block(data: &[u8]) -> (Headers, Vec<usize>) {
-    let ExtractedHeaders { headers, skipped } = extract_header_block(&bytes_to_str(data));
-    let headers = headers
+/// The rows of a header block with no start line, the byte offsets of the
+/// lines that are not rows, and the breaches in the rows' names.
+pub(crate) fn header_block(data: &[u8]) -> (Headers, Vec<usize>, Vec<ParseWarning>) {
+    let extracted = extract_header_block(&bytes_to_str(data));
+    let headers = extracted
+        .headers
         .into_iter()
         .map(|(name, value)| (name.into_owned(), value.into_owned()))
         .collect();
-    (headers, skipped)
+    (headers, extracted.skipped, extracted.warnings)
 }
 
 /// Split at the first blank line, under the rule `sip_header` reads headers by:
