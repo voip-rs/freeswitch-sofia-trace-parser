@@ -579,6 +579,13 @@ impl std::fmt::Display for MessageStats {
                     self.input.non_sip_prefix_bytes()
                 )?;
             }
+            if self.input.unusable_content_lengths() > 0 {
+                writeln!(
+                    f,
+                    "  messages ended at their blank line, Content-Length unusable: {}",
+                    self.input.unusable_content_lengths()
+                )?;
+            }
         }
 
         let mut methods: Vec<_> = self.method_counts.iter().collect();
