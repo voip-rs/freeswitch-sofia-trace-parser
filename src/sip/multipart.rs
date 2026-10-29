@@ -3,9 +3,8 @@ use std::borrow::Cow;
 use memchr::memmem;
 use sip_header::Field;
 
-use crate::finders::CRLFCRLF;
 use crate::sip::content_type::{canonical_body_header, extract_boundary, normalize_media_type};
-use crate::sip::{header_block, HasHeaders};
+use crate::sip::{header_block, split_headers_body, HasHeaders};
 use crate::types::{Headers, MimePart, ParsedSipMessage};
 
 #[cfg(test)]
@@ -235,10 +234,7 @@ fn parse_multipart_body(body: &[u8], boundary: &str) -> Vec<MimePart> {
 }
 
 fn parse_mime_part(data: &[u8]) -> MimePart {
-    let (header_bytes, body) = match CRLFCRLF.find(data) {
-        Some(pos) => (&data[..pos], &data[pos + 4..]),
-        None => (data, &[][..]),
-    };
+    let (header_bytes, body) = split_headers_body(data, 0);
     let (headers, skipped, warnings) = header_block(header_bytes);
     // A first line that is no clean header line means the part has no headers.
     let name_breach_at_start = warnings
