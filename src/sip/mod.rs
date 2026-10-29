@@ -331,7 +331,8 @@ pub(crate) fn header_block(data: &[u8]) -> (Headers, Vec<usize>, Vec<ParseWarnin
         .into_iter()
         .map(|(name, value)| (name.into_owned(), value.into_owned()))
         .collect();
-    (headers, extracted.skipped, extracted.warnings)
+    let skipped = extracted.skipped.iter().map(|s| s.range().start).collect();
+    (headers, skipped, extracted.warnings)
 }
 
 /// Split at the first blank line, under the rule `sip_header` reads headers by:
