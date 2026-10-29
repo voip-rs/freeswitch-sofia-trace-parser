@@ -114,19 +114,6 @@ pub(crate) fn sip_start(buf: &[u8]) -> SipStart {
     }
 }
 
-/// A syntactically valid header first line: a nonempty SIP token, optionally
-/// followed by HCOLON whitespace (SP / HTAB), then a colon.
-pub(crate) fn is_header_line(line: &[u8]) -> bool {
-    let Some(colon) = memchr::memchr(b':', line) else {
-        return false;
-    };
-    let mut name = &line[..colon];
-    while let [rest @ .., b' ' | b'\t'] = name {
-        name = rest;
-    }
-    is_sip_token(name)
-}
-
 fn parse_request_line(line: &[u8]) -> Result<StartLineRef<'_>, ParseError> {
     // <METHOD> <URI> SIP/2.0
     let first_space = memchr::memchr(b' ', line)

@@ -7,10 +7,15 @@
 //! row is sip-header's judgement, read from its line geometry and warnings;
 //! it is never re-implemented here, so the levels and the carriers cannot
 //! drift apart on it.
+//!
+//! `header_block` also says what the block's first line is: no line at all
+//! (an empty block), a clean header row, or anything else. A MIME part and a
+//! sipfrag without a start line decide from that whether they have headers;
+//! a carrier that guessed instead would lose the bytes it misread.
 
 use std::borrow::Cow;
 
-use sip_header::{extract_header_block, ParseWarning};
+use sip_header::{extract_header_block, Field, ParseWarning, Span};
 
 use crate::finders::CRLF;
 use crate::frame::ParseError;
@@ -332,11 +337,28 @@ pub(crate) fn parse_headers(data: &[u8]) -> Headers {
     header_block(data).0
 }
 
-/// The rows of a header block with no start line, the byte offsets of the
-/// lines that are not rows, and the breaches in the rows' names.
-pub(crate) fn header_block(data: &[u8]) -> (Headers, Vec<usize>, Vec<ParseWarning>) {
+/// What the first line of a header block is, as the reader judges it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FirstLine {
+    /// The block has no lines at all.
+    Empty,
+    /// A clean header row starting at the first byte.
+    Header,
+    /// A skipped line, or a row whose name the reader warned about.
+    NotHeader,
+}
+
+/// The rows of a header block with no start line, and what its first line is.
+pub(crate) fn header_block(data: &[u8]) -> (Headers, FirstLine) {
     let block = bytes_to_str(data);
     let extracted = extract_header_block(&block);
+    let first_line = match extracted.row_spans.first() {
+        None if extracted.skipped.is_empty() => FirstLine::Empty,
+        Some(row) if row.range().start == 0 && !name_warned_in(&extracted.warnings, row) => {
+            FirstLine::Header
+        }
+        _ => FirstLine::NotHeader,
+    };
     let rows = extracted
         .headers
         .into_iter()
@@ -349,8 +371,15 @@ pub(crate) fn header_block(data: &[u8]) -> (Headers, Vec<usize>, Vec<ParseWarnin
         &extracted.row_spans,
         &extracted.warnings,
     );
-    let skipped = extracted.skipped.iter().map(|s| s.range().start).collect();
-    (headers, skipped, extracted.warnings)
+    (headers, first_line)
+}
+
+fn name_warned_in(warnings: &[ParseWarning], row: &Span) -> bool {
+    warnings.iter().any(|w| {
+        w.field == Field::Name
+            && w.span()
+                .is_some_and(|s| row.range().contains(&s.range().start))
+    })
 }
 
 /// Split at the first blank line, under the rule `sip_header` reads headers by:

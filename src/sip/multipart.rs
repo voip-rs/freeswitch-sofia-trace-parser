@@ -1,10 +1,9 @@
 use std::borrow::Cow;
 
 use memchr::memmem;
-use sip_header::Field;
 
 use crate::sip::content_type::{canonical_body_header, extract_boundary, normalize_media_type};
-use crate::sip::{header_block, split_headers_body, HasHeaders};
+use crate::sip::{header_block, split_headers_body, FirstLine, HasHeaders};
 use crate::types::{Headers, MimePart, ParsedSipMessage};
 
 #[cfg(test)]
@@ -233,21 +232,21 @@ fn parse_multipart_body(body: &[u8], boundary: &str) -> Vec<MimePart> {
     parts
 }
 
+/// One part, from the byte after its boundary line. An empty header block
+/// leaves no headers and the bytes after the blank line as body; a clean
+/// first header row gives headers and body; any other first line means the
+/// part has no headers, and every byte is body.
 fn parse_mime_part(data: &[u8]) -> MimePart {
     let (header_bytes, body) = split_headers_body(data, 0);
-    let (headers, skipped, warnings) = header_block(header_bytes);
-    // A first line that is no clean header line means the part has no headers.
-    let name_breach_at_start = warnings
-        .iter()
-        .any(|w| w.field == Field::Name && w.span().is_some_and(|s| s.range().start == 0));
-    if skipped.first() == Some(&0) || name_breach_at_start {
-        return MimePart {
+    let (headers, first_line) = header_block(header_bytes);
+    match first_line {
+        FirstLine::NotHeader => MimePart {
             headers: Headers::default(),
             body: data.to_vec(),
-        };
-    }
-    MimePart {
-        headers,
-        body: body.to_vec(),
+        },
+        FirstLine::Empty | FirstLine::Header => MimePart {
+            headers,
+            body: body.to_vec(),
+        },
     }
 }

@@ -2,8 +2,8 @@ use std::borrow::Cow;
 
 use crate::finders::CRLF;
 use crate::frame::ParseError;
-use crate::sip::{parse_headers, split_headers_body, HasHeaders};
-use crate::startline::{is_header_line, parse_first_line};
+use crate::sip::{header_block, parse_headers, split_headers_body, FirstLine, HasHeaders};
+use crate::startline::parse_first_line;
 use crate::types::{MimePart, SipFragment};
 
 /// Parse a `message/sipfrag` body (RFC 3420) — any prefix of a SIP message.
@@ -11,7 +11,7 @@ use crate::types::{MimePart, SipFragment};
 /// The start line is optional: a fragment that begins with a header is parsed
 /// from the headers down. The trailing CRLF is optional too, so a bare status
 /// line parses. Fails only when the first line is neither a start line nor a
-/// header, or the input is empty.
+/// clean header row, as the header reader judges one, or the input is empty.
 pub fn parse_sipfrag(data: &[u8]) -> Result<SipFragment, ParseError> {
     if data.is_empty() {
         return Err(ParseError::InvalidMessage("empty sipfrag".into()));
@@ -28,23 +28,28 @@ pub fn parse_sipfrag(data: &[u8]) -> Result<SipFragment, ParseError> {
         first_line = rest;
     }
 
-    let (message_type, headers_start) = match parse_first_line(first_line) {
-        Ok(mt) => (Some(mt), (first_line_end + 2).min(data.len())),
-        Err(e) => {
-            if !is_header_line(first_line) {
-                return Err(e);
-            }
-            (None, 0)
+    match parse_first_line(first_line) {
+        Ok(mt) => {
+            let (header_bytes, body) =
+                split_headers_body(data, (first_line_end + 2).min(data.len()));
+            Ok(SipFragment {
+                message_type: Some(mt),
+                headers: parse_headers(header_bytes),
+                body: body.to_vec(),
+            })
         }
-    };
-
-    let (header_bytes, body) = split_headers_body(data, headers_start);
-
-    Ok(SipFragment {
-        message_type,
-        headers: parse_headers(header_bytes),
-        body: body.to_vec(),
-    })
+        Err(e) => {
+            let (header_bytes, body) = split_headers_body(data, 0);
+            match header_block(header_bytes) {
+                (headers, FirstLine::Header) => Ok(SipFragment {
+                    message_type: None,
+                    headers,
+                    body: body.to_vec(),
+                }),
+                (_, FirstLine::Empty | FirstLine::NotHeader) => Err(e),
+            }
+        }
+    }
 }
 
 impl SipFragment {
