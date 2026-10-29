@@ -11,8 +11,12 @@
 
 use std::borrow::Cow;
 
+use sip_header::{
+    Field, HeaderParse, NameMatcher, ParseWarning, SipContentLength, SipHeader, Span, WarningCode,
+};
+
 use crate::frame::ParseError;
-use crate::types::SipMessageType;
+use crate::types::{warning_row, SipMessageType};
 
 /// A start line still pointing into the message it came from.
 pub(crate) enum StartLineRef<'a> {
@@ -151,6 +155,139 @@ fn parse_request_line(line: &[u8]) -> Result<StartLineRef<'_>, ParseError> {
     let uri = &rest[..last_space];
 
     Ok(StartLineRef::Request { method, uri })
+}
+
+/// What a message's Content-Length rows say about the length of its body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContentLength {
+    /// No row is a Content-Length.
+    Absent,
+    /// Every Content-Length row is clean and they all carry this number.
+    Length(usize),
+    /// A row is malformed or warned, or two rows disagree.
+    Unusable,
+}
+
+/// What a Content-Length row earns as a header warning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowReport {
+    /// One of several rows that are all clean and equal.
+    Duplicate,
+    /// A row the length cannot be taken from, or one of rows that disagree.
+    Unusable,
+}
+
+pub(crate) struct ContentLengthReading {
+    pub(crate) length: ContentLength,
+    /// `(row index, report)` in row order.
+    pub(crate) reports: Vec<(usize, RowReport)>,
+    /// What the typed parse of a row said about its value, as `(row index,
+    /// code)`, for rows the header reader had not already warned on.
+    pub(crate) typed_warnings: Vec<(usize, WarningCode)>,
+}
+
+fn is_content_length_name(name: &str) -> bool {
+    NameMatcher::from(SipHeader::ContentLength).matches(name)
+}
+
+/// A Content-Length value read as sip-header's typed parse reads it: the
+/// number when it has nothing to say about it, and the warnings it raised.
+/// An error is no number and no warning.
+fn read_value(value: &str) -> (Option<usize>, Vec<WarningCode>) {
+    match SipContentLength::parse_with_warnings(value) {
+        Ok(parsed) => {
+            let codes: Vec<WarningCode> = parsed.warnings.iter().map(|w| w.code).collect();
+            (codes.is_empty().then(|| parsed.value.get()), codes)
+        }
+        Err(_) => (None, Vec::new()),
+    }
+}
+
+/// Reads the Content-Length rows among `rows`, `(name, value)` in wire order;
+/// `value_warned(i)` says whether the header reader warned inside row `i`'s
+/// value.
+pub(crate) fn read_content_length<'a>(
+    rows: impl Iterator<Item = (&'a str, &'a str)>,
+    value_warned: impl Fn(usize) -> bool,
+) -> ContentLengthReading {
+    let mut selected: Vec<(usize, Option<usize>)> = Vec::new();
+    let mut typed_warnings = Vec::new();
+    for (row, (name, value)) in rows.enumerate() {
+        if !is_content_length_name(name) {
+            continue;
+        }
+        if value_warned(row) {
+            selected.push((row, None));
+            continue;
+        }
+        let (length, codes) = read_value(value);
+        typed_warnings.extend(codes.into_iter().map(|code| (row, code)));
+        selected.push((row, length));
+    }
+    let (length, reports) = decide(&selected);
+    ContentLengthReading {
+        length,
+        reports,
+        typed_warnings,
+    }
+}
+
+/// The outcome for rows `(index, clean number)`, and what each earns.
+fn decide(selected: &[(usize, Option<usize>)]) -> (ContentLength, Vec<(usize, RowReport)>) {
+    let Some(&(_, first)) = selected.first() else {
+        return (ContentLength::Absent, Vec::new());
+    };
+    if let Some(n) = first.filter(|_| selected.iter().all(|&(_, len)| len == first)) {
+        let report = (selected.len() > 1).then_some(RowReport::Duplicate);
+        let reports = selected
+            .iter()
+            .filter_map(|&(row, _)| report.map(|r| (row, r)))
+            .collect();
+        return (ContentLength::Length(n), reports);
+    }
+
+    let mut numbers = selected.iter().filter_map(|&(_, len)| len);
+    let disagree = numbers
+        .next()
+        .is_some_and(|one| numbers.any(|other| other != one));
+    let reports = selected
+        .iter()
+        .filter(|&&(_, len)| disagree || len.is_none())
+        .map(|&(row, _)| (row, RowReport::Unusable))
+        .collect();
+    (ContentLength::Unusable, reports)
+}
+
+/// `value_warned` for [`read_content_length`], taken from the reader's row
+/// spans and warnings.
+pub(crate) fn value_warned_in<'a>(
+    row_spans: &'a [Span],
+    warnings: &'a [ParseWarning],
+) -> impl Fn(usize) -> bool + 'a {
+    move |row| {
+        warnings
+            .iter()
+            .any(|w| w.field == Field::Value && warning_row(row_spans, w) == row)
+    }
+}
+
+/// Split at the first blank line, under the rule `sip_header` reads headers by:
+/// lines end at LF, one trailing CR is stripped, the first empty line ends the
+/// block. No blank line means headers run to the end, no body.
+pub(crate) fn split_headers_body(data: &[u8], headers_start: usize) -> (&[u8], &[u8]) {
+    let start = headers_start.min(data.len());
+    let mut pos = start;
+    while let Some(rel) = memchr::memchr(b'\n', &data[pos..]) {
+        let line = match &data[pos..pos + rel] {
+            [rest @ .., b'\r'] => rest,
+            rest => rest,
+        };
+        if line.is_empty() {
+            return (&data[start..pos], &data[pos + rel + 1..]);
+        }
+        pos += rel + 1;
+    }
+    (&data[start..], &[][..])
 }
 
 pub(crate) fn bytes_to_str(b: &[u8]) -> Cow<'_, str> {

@@ -23,7 +23,9 @@ use crate::message::MessageIterator;
 use crate::sip::content_type::{extract_boundary, normalize_media_type};
 use crate::sip::json::unescape_json_body;
 use crate::sip::multipart::{is_multipart_type, split_multipart};
-use crate::startline::{bytes_to_str, parse_first_line, parse_first_line_ref, StartLineRef};
+use crate::startline::{
+    bytes_to_str, parse_first_line, parse_first_line_ref, split_headers_body, StartLineRef,
+};
 use crate::types::{
     value_or_compact, Headers, MimePart, ParseStats, ParsedSipMessage, SipFragment, SipMessage,
     SkipTracking, UnparsedRegion,
@@ -380,25 +382,6 @@ fn name_warned_in(warnings: &[ParseWarning], row: &Span) -> bool {
             && w.span()
                 .is_some_and(|s| row.range().contains(&s.range().start))
     })
-}
-
-/// Split at the first blank line, under the rule `sip_header` reads headers by:
-/// lines end at LF, one trailing CR is stripped, the first empty line ends the
-/// block. No blank line means headers run to the end, no body.
-pub(crate) fn split_headers_body(data: &[u8], headers_start: usize) -> (&[u8], &[u8]) {
-    let start = headers_start.min(data.len());
-    let mut pos = start;
-    while let Some(rel) = memchr::memchr(b'\n', &data[pos..]) {
-        let line = match &data[pos..pos + rel] {
-            [rest @ .., b'\r'] => rest,
-            rest => rest,
-        };
-        if line.is_empty() {
-            return (&data[start..pos], &data[pos + rel + 1..]);
-        }
-        pos += rel + 1;
-    }
-    (&data[start..], &[][..])
 }
 
 #[cfg(test)]
@@ -1035,6 +1018,27 @@ mod tests {
                 let frag = parse_sipfrag(&frag).unwrap();
                 assert_eq!(content_length_warnings(&frag.headers), expected);
             }
+        }
+
+        #[test]
+        fn content_length_warnings_sit_in_row_order_among_the_readers() {
+            let parsed =
+                request_with_block(b"A: \xc2\xa01\r\nContent-Length: 5 bytes\r\nB: 1\x0b\r\n");
+            let warnings: Vec<_> = parsed
+                .headers
+                .warnings()
+                .iter()
+                .map(|w| (w.row(), w.kind()))
+                .collect();
+            assert_eq!(
+                warnings,
+                [
+                    (0, HeaderWarningKind::NonLwsWhitespace),
+                    (1, HeaderWarningKind::TrailingContent),
+                    (1, HeaderWarningKind::UnusableContentLength),
+                    (2, HeaderWarningKind::ControlChar),
+                ]
+            );
         }
 
         #[test]

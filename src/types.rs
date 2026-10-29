@@ -4,6 +4,8 @@ use std::net::SocketAddr;
 
 use sip_header::{Field, ParseWarning, Span, WarningCode};
 
+use crate::startline::{read_content_length, ContentLength, RowReport};
+
 /// Canonical name of an RFC 3261 §7.3.3 compact form, `None` for any other
 /// header name.
 pub(crate) fn expand_compact(name: &str) -> Option<&'static str> {
@@ -779,6 +781,21 @@ fn warning_kind(code: WarningCode) -> HeaderWarningKind {
     }
 }
 
+/// Where in the block the reader points a warning at.
+fn warning_at(w: &ParseWarning) -> usize {
+    w.position
+        .or_else(|| w.span().map(|s| s.range().start))
+        .unwrap_or(0)
+}
+
+/// Index of the row a reader warning is in.
+pub(crate) fn warning_row(row_spans: &[Span], w: &ParseWarning) -> usize {
+    let at = warning_at(w);
+    row_spans
+        .partition_point(|r| r.range().start <= at)
+        .saturating_sub(1)
+}
+
 fn warning_part(field: Field) -> HeaderPart {
     match field {
         Field::Name => HeaderPart::Name,
@@ -811,21 +828,37 @@ impl Headers {
         let mut located: Vec<(usize, usize, HeaderWarning)> = warnings
             .iter()
             .map(|w| {
-                let at = w
-                    .position
-                    .or_else(|| w.span().map(|s| s.range().start))
-                    .unwrap_or(0);
-                let row = row_spans
-                    .partition_point(|r| r.range().start <= at)
-                    .saturating_sub(1);
+                let row = warning_row(row_spans, w);
                 let warning = HeaderWarning {
                     row,
                     part: warning_part(w.field),
                     kind: warning_kind(w.code),
                 };
-                (row, at, warning)
+                (row, warning_at(w), warning)
             })
             .collect();
+        let reading = read_content_length(
+            rows.iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+            |row| {
+                located
+                    .iter()
+                    .any(|(r, _, w)| *r == row && w.part == HeaderPart::Value)
+            },
+        );
+        located.extend(reading.typed_warnings.into_iter().map(|(row, code)| {
+            let part = HeaderPart::Value;
+            let kind = warning_kind(code);
+            (row, usize::MAX - 1, HeaderWarning { row, part, kind })
+        }));
+        located.extend(reading.reports.into_iter().map(|(row, report)| {
+            let kind = match report {
+                RowReport::Duplicate => HeaderWarningKind::DuplicateContentLength,
+                RowReport::Unusable => HeaderWarningKind::UnusableContentLength,
+            };
+            let part = HeaderPart::Value;
+            (row, usize::MAX, HeaderWarning { row, part, kind })
+        }));
         located.sort_by_key(|(row, at, _)| (*row, *at));
         let warnings = located.into_iter().map(|(_, _, w)| w).collect();
         Headers(rows, Diagnostics { skipped, warnings })
@@ -1029,7 +1062,22 @@ impl ParsedSipMessage {
     /// none, or when its Content-Length rows are unusable (malformed, warned,
     /// or disagreeing), which [`Headers::warnings`] then names.
     pub fn content_length(&self) -> Option<usize> {
-        value_or_compact(&self.headers, "Content-Length").and_then(|v| v.trim().parse().ok())
+        let warned = |row| {
+            self.headers.warnings().iter().any(|w| {
+                w.row() == row
+                    && w.part() == HeaderPart::Value
+                    && !matches!(
+                        w.kind(),
+                        HeaderWarningKind::DuplicateContentLength
+                            | HeaderWarningKind::UnusableContentLength
+                    )
+            })
+        };
+        let rows = self.headers.iter().map(|(n, v)| (n.as_str(), v.as_str()));
+        match read_content_length(rows, warned).length {
+            ContentLength::Length(n) => Some(n),
+            ContentLength::Absent | ContentLength::Unusable => None,
+        }
     }
 
     /// Returns the CSeq header value (e.g., `"1 INVITE"`).

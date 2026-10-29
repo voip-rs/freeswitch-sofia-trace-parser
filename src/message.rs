@@ -1,10 +1,14 @@
 use std::collections::{HashMap, VecDeque};
 
+use sip_header::SipMessageHeaders;
 use tracing::{debug, info, trace};
 
 use crate::finders::{CRLF, CRLFCRLF};
 use crate::frame::{FrameIterator, ParseError};
-use crate::startline::{sip_start, SipStart};
+use crate::startline::{
+    bytes_to_str, read_content_length, sip_start, split_headers_body, value_warned_in,
+    ContentLength, SipStart,
+};
 use crate::types::{
     Direction, ParseStats, SipMessage, SkipTracking, StaleClock, Timestamp, Transport,
     UnparsedRegion,
@@ -137,7 +141,7 @@ impl<R: std::io::Read> MessageIterator<R> {
     }
 
     fn flush_all(&mut self) {
-        let mut loss = ResyncLoss::default();
+        let mut loss = FramingLoss::default();
         for (key, mut buf) in std::mem::take(&mut self.buffers) {
             extract_complete(&mut buf, &key, &mut self.ready, &mut loss);
 
@@ -148,16 +152,14 @@ impl<R: std::io::Read> MessageIterator<R> {
                     .push_back(message(&buf, &key, content, frame_count));
             }
         }
-        self.record_resync_loss(loss);
+        self.record_framing_loss(loss);
     }
 
-    fn record_resync_loss(&mut self, loss: ResyncLoss) {
-        if loss.count == 0 {
-            return;
-        }
+    fn record_framing_loss(&mut self, loss: FramingLoss) {
         let stats = self.frames.stats_mut();
         stats.non_sip_prefixes += loss.count;
         stats.non_sip_prefix_bytes += loss.bytes;
+        stats.unusable_content_lengths += loss.unusable_lengths;
     }
 }
 
@@ -227,13 +229,13 @@ impl<R: std::io::Read> Iterator for MessageIterator<R> {
                     buf.content.extend_from_slice(&frame.content);
                     buf.frame_count += 1;
 
-                    let mut loss = ResyncLoss::default();
+                    let mut loss = FramingLoss::default();
                     extract_complete(buf, &key, &mut self.ready, &mut loss);
 
                     if buf.content.is_empty() {
                         self.buffers.remove(&key);
                     }
-                    self.record_resync_loss(loss);
+                    self.record_framing_loss(loss);
 
                     if let Some(msg) = self.ready.pop_front() {
                         return Some(Ok(msg));
@@ -257,12 +259,13 @@ enum Resync {
     Wait,
 }
 
-/// Bytes dropped resyncing a buffer, tallied into [`ParseStats`] once the
-/// caller is done borrowing the buffer map.
+/// Bytes dropped resyncing a buffer and lengths refused framing it, tallied
+/// into [`ParseStats`] once the caller is done borrowing the buffer map.
 #[derive(Default)]
-struct ResyncLoss {
+struct FramingLoss {
     count: u64,
     bytes: u64,
+    unusable_lengths: u64,
 }
 
 /// Move every message the buffer already holds in full into `ready`.
@@ -270,7 +273,7 @@ fn extract_complete(
     buf: &mut ConnectionBuffer,
     key: &ConnectionKey,
     ready: &mut VecDeque<SipMessage>,
-    loss: &mut ResyncLoss,
+    loss: &mut FramingLoss,
 ) {
     loop {
         if buf.content.is_empty() {
@@ -281,7 +284,7 @@ fn extract_complete(
             Resync::Retry => continue,
             Resync::Wait => return,
         }
-        if !split_one_message(buf, key, ready) {
+        if !split_one_message(buf, key, ready, loss) {
             return;
         }
     }
@@ -291,7 +294,7 @@ fn extract_complete(
 fn resync_to_sip_start(
     buf: &mut ConnectionBuffer,
     key: &ConnectionKey,
-    loss: &mut ResyncLoss,
+    loss: &mut FramingLoss,
 ) -> Resync {
     match sip_start(&buf.content) {
         SipStart::Yes => return Resync::Ready,
@@ -354,6 +357,7 @@ fn split_one_message(
     buf: &mut ConnectionBuffer,
     key: &ConnectionKey,
     ready: &mut VecDeque<SipMessage>,
+    loss: &mut FramingLoss,
 ) -> bool {
     let header_end = match CRLFCRLF.find(&buf.content) {
         Some(offset) => offset,
@@ -361,15 +365,22 @@ fn split_one_message(
     };
     let body_start = header_end + 4;
 
-    let msg_end = match find_content_length(&buf.content, header_end) {
-        Some(cl) => {
-            let end = body_start + cl;
+    let length = find_content_length(&buf.content, header_end);
+    let msg_end = match length {
+        ContentLength::Length(cl) => {
+            let end = body_start.saturating_add(cl);
             if end > buf.content.len() {
                 return false; // Body incomplete, wait for more data
             }
             end
         }
-        None => body_start, // No CL = no body (RFC 3261 Section 18.3)
+        // No CL = no body (RFC 3261 Section 18.3); an unusable one is no
+        // length to trust, and its body is left to resynchronisation.
+        ContentLength::Absent => body_start,
+        ContentLength::Unusable => {
+            loss.unusable_lengths += 1;
+            body_start
+        }
     };
 
     let remaining = buf.content.split_off(msg_end);
@@ -412,70 +423,20 @@ fn message(
     }
 }
 
-/// The usable Content-Length of the message whose headers end at `header_end`,
-/// read from the same header slice Level 3 reads; an unusable one is counted.
-fn find_content_length(data: &[u8], header_end: usize) -> Option<usize> {
-    let headers = &data[..header_end];
-
-    let mut pos = 0;
-    while pos < headers.len() {
-        let line_end = CRLF.find(&headers[pos..]).unwrap_or(headers.len() - pos);
-        let line = &headers[pos..pos + line_end];
-
-        if let Some(value) = extract_header_value(line, b"Content-Length") {
-            return parse_content_length(value);
-        }
-        if let Some(value) = extract_compact_header_value(line, b'l') {
-            return parse_content_length(value);
-        }
-
-        pos += line_end + 2; // skip \r\n
-    }
-    None
-}
-
-/// RFC 3261 HCOLON allows SP/HTAB between the header name and the colon, and
-/// `sip_header` accepts it, so Level 2 framing must see the same header.
-fn extract_header_value<'a>(line: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
-    let rest = line.get(name.len()..)?;
-    if !line[..name.len()].eq_ignore_ascii_case(name) {
-        return None;
-    }
-    let pad = rest
-        .iter()
-        .position(|&c| c != b' ' && c != b'\t')
-        .unwrap_or(rest.len());
-    match rest.get(pad..)?.split_first() {
-        Some((b':', value)) => Some(trim_bytes(value)),
-        _ => None,
-    }
-}
-
-fn extract_compact_header_value(line: &[u8], compact: u8) -> Option<&[u8]> {
-    if line.len() < 2 {
-        return None;
-    }
-    if line[0] != compact || line[1] != b':' {
-        return None;
-    }
-    Some(trim_bytes(&line[2..]))
-}
-
-fn trim_bytes(b: &[u8]) -> &[u8] {
-    let start = b
-        .iter()
-        .position(|&c| c != b' ' && c != b'\t')
-        .unwrap_or(b.len());
-    let end = b
-        .iter()
-        .rposition(|&c| c != b' ' && c != b'\t')
-        .map_or(start, |p| p + 1);
-    &b[start..end]
-}
-
-fn parse_content_length(value: &[u8]) -> Option<usize> {
-    let s = std::str::from_utf8(value).ok()?;
-    s.parse().ok()
+/// What the Content-Length rows of the message whose headers end at
+/// `header_end` say, read from the same header slice Level 3 reads. The
+/// caller counts an unusable one.
+fn find_content_length(data: &[u8], header_end: usize) -> ContentLength {
+    // The CRLFCRLF at `header_end` bounds the blank-line search; the first
+    // CRLF is at or before it.
+    let Some(first_line_end) = CRLF.find(data) else {
+        return ContentLength::Absent;
+    };
+    let (block, _) = split_headers_body(&data[..header_end + 4], first_line_end + 2);
+    let block = bytes_to_str(block);
+    let headers = SipMessageHeaders::from_header_block(&block);
+    let warned = value_warned_in(headers.row_spans(), headers.warnings());
+    read_content_length(headers.iter(), warned).length
 }
 
 /// Scan for the first SIP message start at a CRLF boundary within data. A
@@ -526,12 +487,15 @@ mod tests {
             address: "[::1]:5060".to_string(),
         };
         let mut ready = VecDeque::new();
-        extract_complete(buf, &key, &mut ready, &mut ResyncLoss::default());
+        extract_complete(buf, &key, &mut ready, &mut FramingLoss::default());
         ready.into()
     }
 
     fn content_length(data: &[u8]) -> Option<usize> {
-        find_content_length(data, CRLFCRLF.find(data)?)
+        match find_content_length(data, CRLFCRLF.find(data)?) {
+            ContentLength::Length(n) => Some(n),
+            ContentLength::Absent | ContentLength::Unusable => None,
+        }
     }
 
     fn make_frame(
@@ -1490,7 +1454,7 @@ mod tests {
                 refused(
                     "trailing text",
                     b"Content-Length: 5 bytes\r\n",
-                    &[(1, K::UnusableContentLength)],
+                    &[(1, K::TrailingContent), (1, K::UnusableContentLength)],
                 ),
                 refused(
                     "plus sign",
@@ -1500,7 +1464,7 @@ mod tests {
                 refused(
                     "digits then letters",
                     b"Content-Length: 5abc\r\n",
-                    &[(1, K::UnusableContentLength)],
+                    &[(1, K::TrailingContent), (1, K::UnusableContentLength)],
                 ),
                 refused(
                     "empty",
@@ -1530,7 +1494,7 @@ mod tests {
                 refused(
                     "nul after",
                     b"Content-Length: 5\x00\r\n",
-                    &[(1, K::UnusableContentLength)],
+                    &[(1, K::ControlChar), (1, K::UnusableContentLength)],
                 ),
                 refused(
                     "nul between digits",

@@ -3,7 +3,8 @@ use std::borrow::Cow;
 use memchr::memmem;
 
 use crate::sip::content_type::{canonical_body_header, extract_boundary, normalize_media_type};
-use crate::sip::{header_block, split_headers_body, FirstLine, HasHeaders};
+use crate::sip::{header_block, FirstLine, HasHeaders};
+use crate::startline::split_headers_body;
 use crate::types::{Headers, MimePart, ParsedSipMessage};
 
 #[cfg(test)]
