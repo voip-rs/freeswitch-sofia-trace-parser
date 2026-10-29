@@ -1,3 +1,13 @@
+//! Level 3: a reassembled message, or a part of one, as headers and body.
+//!
+//! Every header block, a message's, a sipfrag's or a MIME part's, goes
+//! through [`header_block`], which reads it with sip-header and keeps what
+//! sip-header could not read as clean rows: the skipped lines and the
+//! warnings, on the [`Headers`] it returns. Whether a line is a clean header
+//! row is sip-header's judgement, read from its line geometry and warnings;
+//! it is never re-implemented here, so the levels and the carriers cannot
+//! drift apart on it.
+
 use std::borrow::Cow;
 
 use sip_header::{extract_header_block, ParseWarning};
@@ -863,6 +873,80 @@ mod tests {
                 "whitespace-only content {:?} should produce TransportNoise, got: {err}",
                 content,
             );
+        }
+    }
+
+    mod diagnostics {
+        use crate::sip::test_support::{
+            assert_messy_diagnostics, parsed_with_headers, request_with_block, MESSY_BLOCK,
+        };
+        use crate::types::Headers;
+
+        #[test]
+        fn message_reports_skipped_lines_and_warnings() {
+            let parsed = request_with_block(MESSY_BLOCK);
+            assert_messy_diagnostics(&parsed.headers);
+            assert_eq!(parsed.headers.len(), 4);
+        }
+
+        #[test]
+        fn leading_orphan_continuation_precedes_row_zero() {
+            let parsed = request_with_block(b" x\r\nA: 1\r\n");
+            let skipped = parsed.headers.skipped_lines();
+            assert_eq!(skipped.len(), 1);
+            assert_eq!(skipped[0].text(), " x");
+            assert_eq!(skipped[0].before_row(), 0);
+        }
+
+        #[test]
+        fn skipped_line_after_the_last_row_precedes_the_row_count() {
+            let parsed = request_with_block(b"A: 1\r\nB: 2\r\nno colon\r\n");
+            let skipped = parsed.headers.skipped_lines();
+            assert_eq!(skipped.len(), 1);
+            assert_eq!(skipped[0].before_row(), 2);
+        }
+
+        #[test]
+        fn skipped_lines_keep_wire_order_between_rows() {
+            let parsed = request_with_block(b"first\r\nA: 1\r\nsecond\r\nB: 2\r\nthird\r\n");
+            let skipped: Vec<_> = parsed
+                .headers
+                .skipped_lines()
+                .iter()
+                .map(|s| (s.text(), s.before_row()))
+                .collect();
+            assert_eq!(skipped, [("first", 0), ("second", 1), ("third", 2)]);
+        }
+
+        #[test]
+        fn skipped_line_text_survives_invalid_utf8() {
+            let parsed = request_with_block(b"A: 1\r\nbad \xff line\r\nB: 2\r\n");
+            let skipped = parsed.headers.skipped_lines();
+            assert_eq!(skipped.len(), 1);
+            assert_eq!(skipped[0].text(), "bad \u{fffd} line");
+            assert_eq!(skipped[0].before_row(), 1);
+        }
+
+        #[test]
+        fn clean_message_has_no_diagnostics() {
+            let parsed = parsed_with_headers("clean", &["Via: SIP/2.0/UDP h"], b"");
+            assert!(parsed.headers.skipped_lines().is_empty());
+            assert!(parsed.headers.warnings().is_empty());
+        }
+
+        #[test]
+        fn headers_built_from_pairs_carry_no_diagnostics() {
+            let headers = Headers::from(vec![("Incident ID".to_string(), "x".to_string())]);
+            assert!(headers.skipped_lines().is_empty());
+            assert!(headers.warnings().is_empty());
+        }
+
+        #[test]
+        fn diagnostics_take_part_in_equality() {
+            let parsed = request_with_block(MESSY_BLOCK);
+            let rows: Vec<_> = parsed.headers.iter().cloned().collect();
+            assert_ne!(parsed.headers, Headers::from(rows.clone()));
+            assert_eq!(parsed.headers.clone(), parsed.headers);
         }
     }
 }

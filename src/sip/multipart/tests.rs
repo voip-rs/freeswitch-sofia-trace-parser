@@ -1,5 +1,8 @@
 use crate::finders::CRLF;
-use crate::sip::test_support::{make_multipart_invite, make_sip_message, parsed_with_headers};
+use crate::sip::test_support::{
+    assert_messy_diagnostics, make_multipart_invite, make_sip_message, parsed_with_headers,
+    MESSY_BLOCK,
+};
 use crate::types::{Headers, MimePart, SipMessage};
 
 #[test]
@@ -699,4 +702,15 @@ fn non_multipart_part_has_no_children() {
     assert!(!sdp_part.is_multipart());
     assert!(sdp_part.multipart_boundary().is_none());
     assert!(sdp_part.body_parts().is_none());
+}
+
+#[test]
+fn part_reports_skipped_lines_and_warnings() {
+    let mut body = b"--b\r\n".to_vec();
+    body.extend_from_slice(MESSY_BLOCK);
+    body.extend_from_slice(b"\r\nbody\r\n--b--");
+    let parts = split_on_b("part-diagnostics", &body);
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0].body, b"body");
+    assert_messy_diagnostics(&parts[0].headers);
 }

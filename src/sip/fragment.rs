@@ -69,7 +69,7 @@ impl MimePart {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sip::test_support::make_multipart_invite;
+    use crate::sip::test_support::{assert_messy_diagnostics, make_multipart_invite, MESSY_BLOCK};
     use crate::types::SipMessageType;
 
     #[test]
@@ -206,5 +206,13 @@ mod tests {
                 reason: "Trying".into()
             })
         );
+    }
+
+    #[test]
+    fn sipfrag_reports_skipped_lines_and_warnings() {
+        let mut data = MESSY_BLOCK.to_vec();
+        data.extend_from_slice(b"\r\n");
+        let frag = parse_sipfrag(&data).unwrap();
+        assert_messy_diagnostics(&frag.headers);
     }
 }

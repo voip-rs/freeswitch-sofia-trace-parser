@@ -654,6 +654,13 @@ impl SipMessageType {
 
 /// Headers in wire order as `(name, value)` pairs. Names preserve original
 /// casing; [`value`](Self::value) is the case-insensitive lookup.
+///
+/// Parsed headers also carry what the reader could not or would not read as
+/// clean rows: [`skipped_lines`](Self::skipped_lines), lines that are no
+/// header at all, and [`warnings`](Self::warnings), rows read despite a
+/// breach. Both describe the block as parsed: editing rows through `DerefMut`
+/// does not update them, and headers built from pairs carry none. Skipped-line
+/// text is message content, so a redactor that rewrites only rows misses it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Headers(Vec<(String, String)>);
 
@@ -1123,5 +1130,33 @@ mod tests {
             r#"{"key":"value\nwith\\escapes"}"#,
             "body_data() must preserve raw escapes"
         );
+    }
+
+    #[test]
+    fn warning_codes_map_to_their_kind() {
+        use sip_header::WarningCode as C;
+        let cases = [
+            (C::HeaderNameWhitespace, HeaderWarningKind::Whitespace),
+            (C::NonAscii, HeaderWarningKind::NonAscii),
+            (C::InvalidToken, HeaderWarningKind::InvalidToken),
+            (C::NonLwsWhitespace, HeaderWarningKind::NonLwsWhitespace),
+            (C::ControlChar, HeaderWarningKind::ControlChar),
+            (C::TrailingContent, HeaderWarningKind::TrailingContent),
+            // Codes the header reader never emits on a block still surface.
+            (C::MissingIndex, HeaderWarningKind::Other),
+            (C::UnterminatedQuote, HeaderWarningKind::Other),
+        ];
+        for (code, kind) in cases {
+            assert_eq!(warning_kind(code), kind, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn fields_map_to_their_part() {
+        use sip_header::Field;
+        assert_eq!(warning_part(Field::Name), HeaderPart::Name);
+        assert_eq!(warning_part(Field::Value), HeaderPart::Value);
+        assert_eq!(warning_part(Field::Param), HeaderPart::Other);
+        assert_eq!(warning_part(Field::Entry), HeaderPart::Other);
     }
 }
