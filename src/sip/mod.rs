@@ -1,7 +1,7 @@
 //! Level 3: a reassembled message, or a part of one, as headers and body.
 //!
 //! Every header block, a message's, a sipfrag's or a MIME part's, goes
-//! through [`header_block`], which reads it with sip-header and keeps what
+//! through `header_block`, which reads it with sip-header and keeps what
 //! sip-header could not read as clean rows: the skipped lines and the
 //! warnings, on the [`Headers`] it returns. Whether a line is a clean header
 //! row is sip-header's judgement, read from its line geometry and warnings;
@@ -335,12 +335,20 @@ pub(crate) fn parse_headers(data: &[u8]) -> Headers {
 /// The rows of a header block with no start line, the byte offsets of the
 /// lines that are not rows, and the breaches in the rows' names.
 pub(crate) fn header_block(data: &[u8]) -> (Headers, Vec<usize>, Vec<ParseWarning>) {
-    let extracted = extract_header_block(&bytes_to_str(data));
-    let headers = extracted
+    let block = bytes_to_str(data);
+    let extracted = extract_header_block(&block);
+    let rows = extracted
         .headers
         .into_iter()
         .map(|(name, value)| (name.into_owned(), value.into_owned()))
         .collect();
+    let headers = Headers::parsed(
+        rows,
+        &block,
+        &extracted.skipped,
+        &extracted.row_spans,
+        &extracted.warnings,
+    );
     let skipped = extracted.skipped.iter().map(|s| s.range().start).collect();
     (headers, skipped, extracted.warnings)
 }
@@ -880,7 +888,7 @@ mod tests {
         use crate::sip::test_support::{
             assert_messy_diagnostics, parsed_with_headers, request_with_block, MESSY_BLOCK,
         };
-        use crate::types::Headers;
+        use crate::types::{HeaderPart, Headers};
 
         #[test]
         fn message_reports_skipped_lines_and_warnings() {
@@ -925,6 +933,18 @@ mod tests {
             assert_eq!(skipped.len(), 1);
             assert_eq!(skipped[0].text(), "bad \u{fffd} line");
             assert_eq!(skipped[0].before_row(), 1);
+        }
+
+        #[test]
+        fn warning_at_the_first_byte_of_a_row_belongs_to_that_row() {
+            let parsed = request_with_block("A: 1\r\n\u{e9}x: 2\r\n".as_bytes());
+            let warnings: Vec<_> = parsed
+                .headers
+                .warnings()
+                .iter()
+                .map(|w| (w.row(), w.part()))
+                .collect();
+            assert_eq!(warnings, [(1, HeaderPart::Name)]);
         }
 
         #[test]

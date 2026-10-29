@@ -2,6 +2,8 @@ use std::borrow::Cow;
 use std::fmt;
 use std::net::SocketAddr;
 
+use sip_header::{Field, ParseWarning, Span, WarningCode};
+
 /// Canonical name of an RFC 3261 §7.3.3 compact form, `None` for any other
 /// header name.
 pub(crate) fn expand_compact(name: &str) -> Option<&'static str> {
@@ -662,9 +664,172 @@ impl SipMessageType {
 /// does not update them, and headers built from pairs carry none. Skipped-line
 /// text is message content, so a redactor that rewrites only rows misses it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Headers(Vec<(String, String)>);
+pub struct Headers(Vec<(String, String)>, Diagnostics);
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Diagnostics {
+    skipped: Vec<SkippedLine>,
+    warnings: Vec<HeaderWarning>,
+}
+
+/// A line of a header block that is no header row and no continuation of
+/// one, as the parser skipped it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SkippedLine {
+    text: String,
+    before_row: usize,
+}
+
+impl SkippedLine {
+    /// The line as read, without its CR or LF. Invalid UTF-8 in it reads as
+    /// U+FFFD, as it does in the rows.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Index of the row the line precedes: 0 before the first row, the row
+    /// count after the last.
+    pub fn before_row(&self) -> usize {
+        self.before_row
+    }
+}
+
+/// A row read despite a breach of the header grammar: the row is kept as
+/// sent and this says what was wrong with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HeaderWarning {
+    row: usize,
+    part: HeaderPart,
+    kind: HeaderWarningKind,
+}
+
+impl HeaderWarning {
+    /// Index of the row the breach is in.
+    pub fn row(&self) -> usize {
+        self.row
+    }
+
+    /// Which half of the row the breach is in.
+    pub fn part(&self) -> HeaderPart {
+        self.part
+    }
+
+    /// What is wrong with it.
+    pub fn kind(&self) -> HeaderWarningKind {
+        self.kind
+    }
+}
+
+/// The half of a header row a [`HeaderWarning`] is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HeaderPart {
+    /// The header name, before the colon.
+    Name,
+    /// The header value, after the colon.
+    Value,
+    /// Anything else the reader reports.
+    Other,
+}
+
+/// What is wrong with a row, as a [`HeaderWarning`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HeaderWarningKind {
+    /// Space or tab inside a header name.
+    Whitespace,
+    /// A non-ASCII character in a header name.
+    NonAscii,
+    /// A character outside the RFC 3261 token rule in a header name.
+    InvalidToken,
+    /// Whitespace other than space and tab around a value, such as NBSP.
+    NonLwsWhitespace,
+    /// A control character, such as VT or FF, in whitespace around a value.
+    ControlChar,
+    /// Text after a complete value, dropped from the typed reading.
+    TrailingContent,
+    /// A breach this version does not name.
+    Other,
+}
+
+fn warning_kind(code: WarningCode) -> HeaderWarningKind {
+    match code {
+        WarningCode::HeaderNameWhitespace => HeaderWarningKind::Whitespace,
+        WarningCode::NonAscii => HeaderWarningKind::NonAscii,
+        WarningCode::InvalidToken => HeaderWarningKind::InvalidToken,
+        WarningCode::NonLwsWhitespace => HeaderWarningKind::NonLwsWhitespace,
+        WarningCode::ControlChar => HeaderWarningKind::ControlChar,
+        WarningCode::TrailingContent => HeaderWarningKind::TrailingContent,
+        _ => HeaderWarningKind::Other,
+    }
+}
+
+fn warning_part(field: Field) -> HeaderPart {
+    match field {
+        Field::Name => HeaderPart::Name,
+        Field::Value => HeaderPart::Value,
+        _ => HeaderPart::Other,
+    }
+}
 
 impl Headers {
+    /// Headers read from `block` by the header reader: `rows`, with the
+    /// reader's skipped lines, row extents and warnings, all spans being
+    /// byte offsets into `block`.
+    pub(crate) fn parsed(
+        rows: Vec<(String, String)>,
+        block: &str,
+        skipped: &[Span],
+        row_spans: &[Span],
+        warnings: &[ParseWarning],
+    ) -> Self {
+        let skipped = skipped
+            .iter()
+            .map(|span| {
+                let range = span.range();
+                SkippedLine {
+                    before_row: row_spans.partition_point(|r| r.range().start < range.start),
+                    text: block.get(range).unwrap_or_default().to_string(),
+                }
+            })
+            .collect();
+        let mut located: Vec<(usize, usize, HeaderWarning)> = warnings
+            .iter()
+            .map(|w| {
+                let at = w
+                    .position
+                    .or_else(|| w.span().map(|s| s.range().start))
+                    .unwrap_or(0);
+                let row = row_spans
+                    .partition_point(|r| r.range().start <= at)
+                    .saturating_sub(1);
+                let warning = HeaderWarning {
+                    row,
+                    part: warning_part(w.field),
+                    kind: warning_kind(w.code),
+                };
+                (row, at, warning)
+            })
+            .collect();
+        located.sort_by_key(|(row, at, _)| (*row, *at));
+        let warnings = located.into_iter().map(|(_, _, w)| w).collect();
+        Headers(rows, Diagnostics { skipped, warnings })
+    }
+
+    /// The lines of the block that are no header, in wire order. Empty for
+    /// headers built from pairs.
+    pub fn skipped_lines(&self) -> &[SkippedLine] {
+        &self.1.skipped
+    }
+
+    /// Every breach the reader found in the rows, ordered by row, then by
+    /// position within it. Empty for headers built from pairs.
+    pub fn warnings(&self) -> &[HeaderWarning] {
+        &self.1.warnings
+    }
+
     /// Every value recorded under `name`, case-insensitively, in wire order.
     /// Compact forms are not resolved, as for [`value`](Self::value).
     pub fn values<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
@@ -701,13 +866,13 @@ impl std::ops::DerefMut for Headers {
 
 impl From<Vec<(String, String)>> for Headers {
     fn from(headers: Vec<(String, String)>) -> Self {
-        Headers(headers)
+        Headers(headers, Diagnostics::default())
     }
 }
 
 impl FromIterator<(String, String)> for Headers {
     fn from_iter<I: IntoIterator<Item = (String, String)>>(iter: I) -> Self {
-        Headers(iter.into_iter().collect())
+        Headers(iter.into_iter().collect(), Diagnostics::default())
     }
 }
 
@@ -921,12 +1086,10 @@ mod tests {
                 usec: 0,
             },
             message_type: msg_type,
-            headers: Headers(
-                headers
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect(),
-            ),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             body: body.to_vec(),
             frame_count: 1,
             offset: 0,
