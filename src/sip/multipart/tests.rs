@@ -404,6 +404,25 @@ fn headerless_part_with_blank_line_keeps_its_bytes() {
 }
 
 #[test]
+fn part_with_empty_header_block_keeps_its_body() {
+    let parts = split_on_b("empty-hdr-block", b"--b\r\n\r\nbody\r\n--b--");
+    assert_eq!(parts.len(), 1);
+    assert!(parts[0].headers.is_empty());
+    assert_eq!(parts[0].body, b"body");
+}
+
+#[test]
+fn part_with_lf_blank_line_keeps_the_lines_after_it() {
+    let parts = split_on_b(
+        "lf-blank",
+        b"--b\r\nContent-Type: text/plain\n\nY: 2\r\n\r\nbody\r\n--b--",
+    );
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0].content_type(), Some("text/plain"));
+    assert_eq!(parts[0].body, b"Y: 2\r\n\r\nbody");
+}
+
+#[test]
 fn part_with_malformed_first_header_name_keeps_its_bytes() {
     let raw = b"Content Type: application/sdp\r\n\r\nv=0";
     let mut body = b"--b\r\n".to_vec();
