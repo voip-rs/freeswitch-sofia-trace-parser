@@ -209,6 +209,22 @@ mod tests {
     }
 
     #[test]
+    fn sipfrag_first_line_without_start_line() {
+        let ok = |data: &[u8]| parse_sipfrag(data).is_ok();
+        assert!(ok(b"To: <sip:a@b>\r\n"));
+        assert!(ok(b"To : <sip:a@b>\r\n"));
+        assert!(!ok(b"X\tY: 1\r\n"));
+        assert!(ok(b"To: x\nCSeq: 1 INVITE\n"));
+        assert!(!ok(b"<sip:a@b>\nTo: x\r\n"));
+        assert!(ok(b"To: <sip:a@b>\n"));
+        assert!(!ok(b"Incident ID: x\r\n"));
+        assert!(!ok(b"<sip:a@b>\r\n"));
+        assert!(!ok(b"\xff\xfeTo: x\r\n"));
+        assert!(!ok(b""));
+        assert!(!ok(b"\r\n"));
+    }
+
+    #[test]
     fn sipfrag_reports_skipped_lines_and_warnings() {
         let mut data = MESSY_BLOCK.to_vec();
         data.extend_from_slice(b"\r\n");

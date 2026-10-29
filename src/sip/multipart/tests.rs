@@ -438,6 +438,37 @@ fn part_with_malformed_first_header_name_keeps_its_bytes() {
 }
 
 #[test]
+fn part_with_blank_first_line_keeps_the_header_looking_lines_as_body() {
+    let parts = split_on_b("blank-then-hdr", b"--b\r\n\r\nX: 1\r\n\r\nz\r\n--b--");
+    assert_eq!(parts.len(), 1);
+    assert!(parts[0].headers.is_empty());
+    assert_eq!(parts[0].body, b"X: 1\r\n\r\nz");
+}
+
+#[test]
+fn part_with_skipped_first_line_keeps_its_bytes() {
+    let raw = b"no colon here\r\nContent-Type: application/sdp\r\n\r\nv=0";
+    let mut body = b"--b\r\n".to_vec();
+    body.extend_from_slice(raw);
+    body.extend_from_slice(b"\r\n--b--");
+    let parts = split_on_b("skipped-first", &body);
+    assert_eq!(parts.len(), 1);
+    assert!(parts[0].headers.is_empty());
+    assert_eq!(parts[0].body, raw);
+}
+
+#[test]
+fn part_with_clean_first_row_takes_headers_and_body() {
+    let parts = split_on_b(
+        "clean-first",
+        b"--b\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n--b--",
+    );
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0].content_type(), Some("application/sdp"));
+    assert_eq!(parts[0].body, b"v=0");
+}
+
+#[test]
 fn malformed_later_header_name_keeps_the_part_headers() {
     let parts = split_on_b(
         "bad-later-name",
