@@ -917,7 +917,7 @@ mod tests {
         use crate::sip::test_support::{
             assert_messy_diagnostics, parsed_with_headers, request_with_block, MESSY_BLOCK,
         };
-        use crate::types::{HeaderPart, Headers};
+        use crate::types::{HeaderPart, HeaderWarningKind, Headers};
 
         #[test]
         fn message_reports_skipped_lines_and_warnings() {
@@ -996,6 +996,74 @@ mod tests {
             let rows: Vec<_> = parsed.headers.iter().cloned().collect();
             assert_ne!(parsed.headers, Headers::from(rows.clone()));
             assert_eq!(parsed.headers.clone(), parsed.headers);
+        }
+
+        fn content_length_warnings(headers: &Headers) -> Vec<(usize, HeaderWarningKind)> {
+            headers
+                .warnings()
+                .iter()
+                .map(|w| {
+                    assert_eq!(w.part(), HeaderPart::Value);
+                    (w.row(), w.kind())
+                })
+                .collect()
+        }
+
+        #[test]
+        fn message_and_sipfrag_report_content_length_rows_alike() {
+            use super::super::parse_sipfrag;
+            let equal = (
+                &b"A: 1\r\nl: 5\r\nContent-Length: 5\r\n"[..],
+                [
+                    (1, HeaderWarningKind::DuplicateContentLength),
+                    (2, HeaderWarningKind::DuplicateContentLength),
+                ],
+            );
+            let differing = (
+                &b"A: 1\r\nl: 3\r\nContent-Length: 5\r\n"[..],
+                [
+                    (1, HeaderWarningKind::UnusableContentLength),
+                    (2, HeaderWarningKind::UnusableContentLength),
+                ],
+            );
+            for (block, expected) in [equal, differing] {
+                let message = request_with_block(block);
+                assert_eq!(content_length_warnings(&message.headers), expected);
+
+                let mut frag = block.to_vec();
+                frag.extend_from_slice(b"\r\n");
+                let frag = parse_sipfrag(&frag).unwrap();
+                assert_eq!(content_length_warnings(&frag.headers), expected);
+            }
+        }
+
+        #[test]
+        fn content_length_of_a_message_is_none_unless_rows_agree() {
+            let length = |block: &[u8]| request_with_block(block).content_length();
+            assert_eq!(length(b"l: 5\r\nContent-Length: 5\r\n"), Some(5));
+            assert_eq!(length(b"l: 3\r\nContent-Length: 5\r\n"), None);
+            assert_eq!(length(b"Content-Length: +5\r\n"), None);
+            assert_eq!(length(b"Content-Length: 5 bytes\r\n"), None);
+            assert_eq!(length(b"Content-Length: 5\r\nl: x\r\n"), None);
+            assert_eq!(length(b"Content-Length:\r\n 5\r\n"), Some(5));
+            assert_eq!(length(b"L: 5\r\n"), Some(5));
+        }
+
+        #[test]
+        fn content_length_of_headers_built_from_pairs_reads_them_clean() {
+            let pairs = |rows: &[(&str, &str)]| {
+                let mut msg = request_with_block(b"");
+                msg.headers = rows
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect();
+                msg.content_length()
+            };
+            assert_eq!(pairs(&[("l", "5")]), Some(5));
+            assert_eq!(pairs(&[("Content-Length", "5"), ("L", "5")]), Some(5));
+            assert_eq!(pairs(&[("Content-Length", "+5")]), None);
+            assert_eq!(pairs(&[("Content-Length", "5"), ("l", "6")]), None);
+            assert_eq!(pairs(&[]), None);
         }
     }
 }

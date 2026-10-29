@@ -123,6 +123,7 @@ pub struct ParseStats {
     pub(crate) stale_evicted_bytes: u64,
     pub(crate) non_sip_prefixes: u64,
     pub(crate) non_sip_prefix_bytes: u64,
+    pub(crate) unusable_content_lengths: u64,
     pub(crate) unparsed_regions: Vec<UnparsedRegion>,
 }
 
@@ -169,6 +170,13 @@ impl ParseStats {
     /// Bytes discarded by those resynchronisations.
     pub fn non_sip_prefix_bytes(&self) -> u64 {
         self.non_sip_prefix_bytes
+    }
+
+    /// TCP messages whose Content-Length rows were unusable (malformed,
+    /// warned, or disagreeing): each ended at its blank line instead of
+    /// being framed on a length, and its body went to resynchronisation.
+    pub fn unusable_content_lengths(&self) -> u64 {
+        self.unusable_content_lengths
     }
 
     /// Detailed unparsed region records. Only populated when
@@ -750,6 +758,11 @@ pub enum HeaderWarningKind {
     ControlChar,
     /// Text after a complete value, dropped from the typed reading.
     TrailingContent,
+    /// Several Content-Length rows, all clean and carrying the same number.
+    DuplicateContentLength,
+    /// A Content-Length row the message cannot be framed on: malformed,
+    /// warned, or disagreeing with another Content-Length row.
+    UnusableContentLength,
     /// A breach this version does not name.
     Other,
 }
@@ -1012,8 +1025,9 @@ impl ParsedSipMessage {
         value_or_compact(&self.headers, "Content-Type")
     }
 
-    /// Returns the Content-Length header value as `usize`. Checks both
-    /// `Content-Length` and the compact form `l`.
+    /// The Content-Length the message was framed on: `None` when it carries
+    /// none, or when its Content-Length rows are unusable (malformed, warned,
+    /// or disagreeing), which [`Headers::warnings`] then names.
     pub fn content_length(&self) -> Option<usize> {
         value_or_compact(&self.headers, "Content-Length").and_then(|v| v.trim().parse().ok())
     }

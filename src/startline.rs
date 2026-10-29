@@ -1,3 +1,14 @@
+//! Grammar shared by every level: the start line, and the Content-Length a
+//! message declares.
+//!
+//! Level 2 frames messages on Content-Length and Level 3 reports it, so both
+//! read it here, from the same rows: every Content-Length row, compact forms
+//! in any case included, read by sip-header. A length is used only when every
+//! such row is clean and they all agree, since the value decides where the
+//! next message starts: a guessed length desynchronises a TCP connection. A
+//! row with an error or any warning, `318 bytes` included, makes the length
+//! unusable, and the message then ends at its blank line.
+
 use std::borrow::Cow;
 
 use crate::frame::ParseError;

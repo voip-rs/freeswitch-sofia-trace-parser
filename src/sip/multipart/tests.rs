@@ -745,3 +745,32 @@ fn part_reports_skipped_lines_and_warnings() {
     assert_eq!(parts[0].body, b"body");
     assert_messy_diagnostics(&parts[0].headers);
 }
+
+#[test]
+fn part_reports_content_length_rows_like_a_message() {
+    use crate::types::{HeaderPart, HeaderWarningKind};
+    let body = b"--b\r\nA: 1\r\nl: 3\r\nContent-Length: 5\r\n\r\nhello\r\n--b--".to_vec();
+    let parts = split_on_b("part-content-length", &body);
+    assert_eq!(parts.len(), 1);
+    let warnings: Vec<_> = parts[0]
+        .headers
+        .warnings()
+        .iter()
+        .map(|w| (w.row(), w.part(), w.kind()))
+        .collect();
+    assert_eq!(
+        warnings,
+        [
+            (
+                1,
+                HeaderPart::Value,
+                HeaderWarningKind::UnusableContentLength
+            ),
+            (
+                2,
+                HeaderPart::Value,
+                HeaderWarningKind::UnusableContentLength
+            ),
+        ]
+    );
+}

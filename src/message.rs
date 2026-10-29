@@ -412,7 +412,8 @@ fn message(
     }
 }
 
-/// Find Content-Length header value in the header block ending at `header_end`.
+/// The usable Content-Length of the message whose headers end at `header_end`,
+/// read from the same header slice Level 3 reads; an unusable one is counted.
 fn find_content_length(data: &[u8], header_end: usize) -> Option<usize> {
     let headers = &data[..header_end];
 
@@ -1419,5 +1420,321 @@ mod tests {
             iter.buffers.is_empty(),
             "flush_all should clear the HashMap"
         );
+    }
+
+    mod content_length {
+        use super::*;
+        use crate::types::{HeaderPart, HeaderWarningKind};
+
+        const FOLLOWER: &[u8] = b"OPTIONS sip:b SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        const BODY: &[u8] = b"hello\r\n";
+
+        use HeaderPart::Value;
+        use HeaderWarningKind as K;
+
+        struct Case {
+            name: &'static str,
+            head: Vec<u8>,
+            body: &'static [u8],
+            framed: bool,
+            length: Option<usize>,
+            warnings: Vec<(usize, HeaderPart, HeaderWarningKind)>,
+            unusable: u64,
+            /// The refused body is itself a SIP start line and swallows what
+            /// follows it.
+            body_starts_a_message: bool,
+        }
+
+        fn request_head(rows: &[u8]) -> Vec<u8> {
+            let mut head = b"NOTIFY sip:a SIP/2.0\r\nCall-ID: x\r\n".to_vec();
+            head.extend_from_slice(rows);
+            head.extend_from_slice(b"\r\n");
+            head
+        }
+
+        fn framed(
+            name: &'static str,
+            rows: &[u8],
+            warnings: &[(usize, HeaderWarningKind)],
+        ) -> Case {
+            Case {
+                name,
+                head: request_head(rows),
+                body: BODY,
+                framed: true,
+                length: Some(5),
+                warnings: warnings.iter().map(|&(r, k)| (r, Value, k)).collect(),
+                unusable: 0,
+                body_starts_a_message: false,
+            }
+        }
+
+        fn refused(
+            name: &'static str,
+            rows: &[u8],
+            warnings: &[(usize, HeaderWarningKind)],
+        ) -> Case {
+            Case {
+                framed: false,
+                length: None,
+                unusable: 1,
+                ..framed(name, rows, warnings)
+            }
+        }
+
+        fn cases() -> Vec<Case> {
+            let overflow = format!("Content-Length: {}\r\n", "9".repeat(25));
+            vec![
+                framed("clean", b"Content-Length: 5\r\n", &[]),
+                framed("padded", b"Content-Length:  5 \r\n", &[]),
+                refused(
+                    "trailing text",
+                    b"Content-Length: 5 bytes\r\n",
+                    &[(1, K::UnusableContentLength)],
+                ),
+                refused(
+                    "plus sign",
+                    b"Content-Length: +5\r\n",
+                    &[(1, K::UnusableContentLength)],
+                ),
+                refused(
+                    "digits then letters",
+                    b"Content-Length: 5abc\r\n",
+                    &[(1, K::UnusableContentLength)],
+                ),
+                refused(
+                    "empty",
+                    b"Content-Length:\r\n",
+                    &[(1, K::UnusableContentLength)],
+                ),
+                refused(
+                    "letters",
+                    b"Content-Length: abc\r\n",
+                    &[(1, K::UnusableContentLength)],
+                ),
+                refused(
+                    "overflow",
+                    overflow.as_bytes(),
+                    &[(1, K::UnusableContentLength)],
+                ),
+                refused(
+                    "nbsp before",
+                    b"Content-Length: \xc2\xa05\r\n",
+                    &[(1, K::NonLwsWhitespace), (1, K::UnusableContentLength)],
+                ),
+                refused(
+                    "ff after",
+                    b"Content-Length: 5\x0c\r\n",
+                    &[(1, K::ControlChar), (1, K::UnusableContentLength)],
+                ),
+                refused(
+                    "nul after",
+                    b"Content-Length: 5\x00\r\n",
+                    &[(1, K::UnusableContentLength)],
+                ),
+                refused(
+                    "nul between digits",
+                    b"Content-Length: 1\x005\r\n",
+                    &[(1, K::UnusableContentLength)],
+                ),
+                framed("folded", b"Content-Length:\r\n 5\r\n", &[]),
+                framed("compact", b"l: 5\r\n", &[]),
+                framed("compact uppercase", b"L: 5\r\n", &[]),
+                framed("compact padded before colon", b"l : 5\r\n", &[]),
+                framed(
+                    "equal rows",
+                    b"Content-Length: 5\r\nl: 5\r\n",
+                    &[
+                        (1, K::DuplicateContentLength),
+                        (2, K::DuplicateContentLength),
+                    ],
+                ),
+                refused(
+                    "differing rows",
+                    b"l: 3\r\nContent-Length: 5\r\n",
+                    &[(1, K::UnusableContentLength), (2, K::UnusableContentLength)],
+                ),
+                refused("absent", b"CSeq: 1 NOTIFY\r\n", &[]).without_count(),
+                Case {
+                    name: "status line ending in a bare LF",
+                    head: b"SIP/2.0 200 OK\nContent-Length: 5\r\n\r\n".to_vec(),
+                    ..refused("", b"", &[]).without_count()
+                },
+                Case {
+                    name: "sipfrag body, unusable length",
+                    head: request_head(b"Content-Type: message/sipfrag\r\nContent-Length: +16\r\n"),
+                    body: b"SIP/2.0 200 OK\r\n",
+                    warnings: vec![(2, Value, K::UnusableContentLength)],
+                    body_starts_a_message: true,
+                    ..refused("", b"", &[])
+                },
+            ]
+        }
+
+        impl Case {
+            fn without_count(self) -> Case {
+                Case {
+                    unusable: 0,
+                    ..self
+                }
+            }
+
+            fn payload(&self) -> Vec<u8> {
+                let mut payload = self.head.clone();
+                payload.extend_from_slice(self.body);
+                payload.extend_from_slice(FOLLOWER);
+                payload
+            }
+
+            fn expected_messages(&self) -> Vec<Vec<u8>> {
+                let mut first = self.head.clone();
+                if self.framed {
+                    first.extend_from_slice(self.body.strip_suffix(b"\r\n").unwrap());
+                    return vec![first, FOLLOWER.to_vec()];
+                }
+                if self.body_starts_a_message {
+                    let mut second = self.body.to_vec();
+                    second.extend_from_slice(FOLLOWER);
+                    return vec![first, second];
+                }
+                vec![first, FOLLOWER.to_vec()]
+            }
+        }
+
+        fn run(payload: &[u8], cuts: &[usize]) -> (Vec<SipMessage>, ParseStats) {
+            let mut data = Vec::new();
+            let mut from = 0;
+            for &to in cuts.iter().chain(std::iter::once(&payload.len())) {
+                data.extend_from_slice(&make_frame(
+                    Direction::Recv,
+                    Transport::Tcp,
+                    "[::1]:5060",
+                    &payload[from..to],
+                ));
+                from = to;
+            }
+            let mut iter = MessageIterator::new(&data[..]);
+            let msgs = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            (msgs, iter.parse_stats().clone())
+        }
+
+        fn shown(content: &[u8]) -> String {
+            String::from_utf8_lossy(content).escape_debug().to_string()
+        }
+
+        fn contents(msgs: &[SipMessage]) -> Vec<String> {
+            msgs.iter().map(|m| shown(&m.content)).collect()
+        }
+
+        fn check<T: PartialEq + std::fmt::Debug>(
+            bad: &mut Vec<String>,
+            case: &Case,
+            what: &str,
+            got: T,
+            want: T,
+        ) {
+            if got != want {
+                bad.push(format!("{}: {what}: got {got:?}, want {want:?}", case.name));
+            }
+        }
+
+        #[test]
+        fn every_input_ends_where_level_three_reads_it_to() {
+            let mut bad = Vec::new();
+            for case in cases() {
+                let (msgs, stats) = run(&case.payload(), &[]);
+                let expected = case.expected_messages();
+                check(
+                    &mut bad,
+                    &case,
+                    "message boundaries",
+                    contents(&msgs),
+                    expected.iter().map(|m| shown(m)).collect(),
+                );
+                check(
+                    &mut bad,
+                    &case,
+                    "unusable count",
+                    stats.unusable_content_lengths(),
+                    case.unusable,
+                );
+                let resynced = !case.framed && !case.body_starts_a_message;
+                check(
+                    &mut bad,
+                    &case,
+                    "resynced bytes",
+                    (stats.non_sip_prefixes(), stats.non_sip_prefix_bytes()),
+                    if resynced {
+                        (1, BODY.len() as u64)
+                    } else {
+                        (0, 0)
+                    },
+                );
+
+                let Some(first) = msgs.first() else {
+                    bad.push(format!("{}: no message", case.name));
+                    continue;
+                };
+                let parsed = first.parse().unwrap();
+                check(
+                    &mut bad,
+                    &case,
+                    "content_length()",
+                    parsed.content_length(),
+                    case.length,
+                );
+                let warnings: Vec<_> = parsed
+                    .headers
+                    .warnings()
+                    .iter()
+                    .map(|w| (w.row(), w.part(), w.kind()))
+                    .collect();
+                check(&mut bad, &case, "warnings", warnings, case.warnings.clone());
+                if let Some(n) = parsed.content_length() {
+                    check(&mut bad, &case, "framed body length", parsed.body.len(), n);
+                }
+            }
+            assert!(bad.is_empty(), "{}", bad.join("\n"));
+        }
+
+        #[test]
+        fn segmentation_does_not_change_any_input() {
+            for case in cases() {
+                let payload = case.payload();
+                let (whole, whole_stats) = run(&payload, &[]);
+                for cut in 1..payload.len() {
+                    let (split, stats) = run(&payload, &[cut]);
+                    assert_eq!(
+                        contents(&split),
+                        contents(&whole),
+                        "{}: cut at {cut}",
+                        case.name
+                    );
+                    assert_eq!(
+                        stats.unusable_content_lengths(),
+                        whole_stats.unusable_content_lengths(),
+                        "{}: unusable count, cut at {cut}",
+                        case.name
+                    );
+                    assert_eq!(
+                        stats.non_sip_prefix_bytes(),
+                        whole_stats.non_sip_prefix_bytes(),
+                        "{}: resync bytes, cut at {cut}",
+                        case.name
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn udp_frames_pass_through_with_an_unusable_length() {
+            let mut content = request_head(b"Content-Length: +5\r\n");
+            content.extend_from_slice(BODY);
+            let data = make_frame(Direction::Recv, Transport::Udp, "[::1]:5060", &content);
+            let mut iter = MessageIterator::new(&data[..]);
+            let msgs = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(contents(&msgs), [shown(&content)]);
+            assert_eq!(iter.parse_stats().unusable_content_lengths(), 0);
+        }
     }
 }
