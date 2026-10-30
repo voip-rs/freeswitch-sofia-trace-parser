@@ -1,13 +1,12 @@
 use std::collections::{HashMap, VecDeque};
 
-use sip_header::SipMessageHeaders;
+use sip_header::{MessageLine, MessageLines};
 use tracing::{debug, info, trace};
 
-use crate::finders::{CRLF, CRLFCRLF};
+use crate::finders::CRLF;
 use crate::frame::{FrameIterator, ParseError};
 use crate::startline::{
-    bytes_to_str, read_content_length, sip_start, split_headers_body, value_warned_in,
-    ContentLength, SipStart,
+    is_content_length_name, read_content_length, sip_start, ContentLength, SipStart,
 };
 use crate::types::{
     Direction, ParseStats, SipMessage, SkipTracking, StaleClock, Timestamp, Transport,
@@ -359,13 +358,9 @@ fn split_one_message(
     ready: &mut VecDeque<SipMessage>,
     loss: &mut FramingLoss,
 ) -> bool {
-    let header_end = match CRLFCRLF.find(&buf.content) {
-        Some(offset) => offset,
-        None => return false, // Headers incomplete, wait for more data
+    let Some((length, body_start)) = find_content_length(&buf.content) else {
+        return false; // Headers incomplete, wait for more data
     };
-    let body_start = header_end + 4;
-
-    let length = find_content_length(&buf.content, header_end);
     let msg_end = match length {
         ContentLength::Length(cl) => {
             let end = body_start.saturating_add(cl);
@@ -423,20 +418,23 @@ fn message(
     }
 }
 
-/// What the Content-Length rows of the message whose headers end at
-/// `header_end` say, read from the same header slice Level 3 reads. The
-/// caller counts an unusable one.
-fn find_content_length(data: &[u8], header_end: usize) -> ContentLength {
-    // The CRLFCRLF at `header_end` bounds the blank-line search; the first
-    // CRLF is at or before it.
-    let Some(first_line_end) = CRLF.find(data) else {
-        return ContentLength::Absent;
-    };
-    let (block, _) = split_headers_body(&data[..header_end + 4], first_line_end + 2);
-    let block = bytes_to_str(block);
-    let headers = SipMessageHeaders::from_header_block(&block);
-    let warned = value_warned_in(headers.row_spans(), headers.warnings());
-    read_content_length(headers.iter(), warned).length
+/// What the Content-Length rows of the message at the front of `data` say,
+/// and where its body starts; `None` while its headers are still arriving.
+/// Headers end at the first blank line, LF or CRLF, as Level 3 reads them.
+/// The caller counts an unusable length.
+fn find_content_length(data: &[u8]) -> Option<(ContentLength, usize)> {
+    let first_line_end = CRLF.find(data)? + 2;
+    let mut lines = MessageLines::<[u8]>::from_header_block(&data[first_line_end..]);
+    let rows = lines
+        .by_ref()
+        .filter_map(|line| match line {
+            MessageLine::Row(row) => Some(row),
+            _ => None,
+        })
+        .filter(|row| is_content_length_name(row.name()))
+        .map(|row| (row.index(), row.text().ok().map(|text| text.value())));
+    let length = read_content_length(rows).length;
+    Some((length, first_line_end + lines.blank_line_end()?))
 }
 
 /// Scan for the first SIP message start at a CRLF boundary within data. A
@@ -492,7 +490,7 @@ mod tests {
     }
 
     fn content_length(data: &[u8]) -> Option<usize> {
-        match find_content_length(data, CRLFCRLF.find(data)?) {
+        match find_content_length(data)?.0 {
             ContentLength::Length(n) => Some(n),
             ContentLength::Absent | ContentLength::Unusable => None,
         }
@@ -972,7 +970,7 @@ mod tests {
 
     #[test]
     fn extract_waits_for_incomplete_headers() {
-        // Headers not complete (no \r\n\r\n)
+        // Headers not complete (no blank line yet)
         let content = b"INVITE sip:a SIP/2.0\r\nContent-Length: 0\r\n".to_vec();
 
         let mut buf = buffer_with(content);
@@ -1519,6 +1517,21 @@ mod tests {
                     &[(1, K::UnusableContentLength), (2, K::UnusableContentLength)],
                 ),
                 refused("absent", b"CSeq: 1 NOTIFY\r\n", &[]).without_count(),
+                Case {
+                    name: "headers end LF LF",
+                    head: b"NOTIFY sip:a SIP/2.0\r\nContent-Length: 5\n\n".to_vec(),
+                    ..framed("", b"", &[])
+                },
+                Case {
+                    name: "headers end CRLF LF",
+                    head: b"NOTIFY sip:a SIP/2.0\r\nContent-Length: 5\r\n\n".to_vec(),
+                    ..framed("", b"", &[])
+                },
+                Case {
+                    name: "no length, headers end LF LF",
+                    head: b"NOTIFY sip:a SIP/2.0\r\nCSeq: 1 NOTIFY\n\n".to_vec(),
+                    ..refused("", b"", &[]).without_count()
+                },
                 Case {
                     name: "status line ending in a bare LF",
                     head: b"SIP/2.0 200 OK\nContent-Length: 5\r\n\r\n".to_vec(),

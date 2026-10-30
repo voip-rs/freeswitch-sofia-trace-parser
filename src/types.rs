@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 
 use sip_header::{Field, ParseWarning, Span, WarningCode};
 
-use crate::startline::{read_content_length, ContentLength, RowReport};
+use crate::startline::{is_content_length_name, read_content_length, ContentLength, RowReport};
 
 /// Canonical name of an RFC 3261 §7.3.3 compact form, `None` for any other
 /// header name.
@@ -841,12 +841,9 @@ impl Headers {
             .collect();
         let reading = read_content_length(
             rows.iter()
-                .map(|(name, value)| (name.as_str(), value.as_str())),
-            |row| {
-                located
-                    .iter()
-                    .any(|(r, _, w)| *r == row && w.part == HeaderPart::Value)
-            },
+                .enumerate()
+                .filter(|(_, (name, _))| is_content_length_name(name.as_bytes()))
+                .map(|(row, (_, value))| (row, Some(Cow::Borrowed(value.as_str())))),
         );
         located.extend(reading.typed_warnings.into_iter().map(|(row, code)| {
             let part = HeaderPart::Value;
@@ -1064,19 +1061,13 @@ impl ParsedSipMessage {
     /// none, or when its Content-Length rows are unusable (malformed, warned,
     /// or disagreeing), which [`Headers::warnings`] then names.
     pub fn content_length(&self) -> Option<usize> {
-        let warned = |row| {
-            self.headers.warnings().iter().any(|w| {
-                w.row() == row
-                    && w.part() == HeaderPart::Value
-                    && !matches!(
-                        w.kind(),
-                        HeaderWarningKind::DuplicateContentLength
-                            | HeaderWarningKind::UnusableContentLength
-                    )
-            })
-        };
-        let rows = self.headers.iter().map(|(n, v)| (n.as_str(), v.as_str()));
-        match read_content_length(rows, warned).length {
+        let rows = self
+            .headers
+            .iter()
+            .enumerate()
+            .filter(|(_, (n, _))| is_content_length_name(n.as_bytes()))
+            .map(|(row, (_, v))| (row, Some(Cow::Borrowed(v.as_str()))));
+        match read_content_length(rows).length {
             ContentLength::Length(n) => Some(n),
             ContentLength::Absent | ContentLength::Unusable => None,
         }
