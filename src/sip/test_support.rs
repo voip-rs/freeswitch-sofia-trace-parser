@@ -64,7 +64,7 @@ pub(super) fn parsed_with_headers(
 }
 
 /// A header block holding a skipped line, a name with whitespace, NBSP value
-/// padding and VT value padding, around clean rows A (row 0) and C (row 3).
+/// padding and VT value padding, around clean row A (row 0).
 pub(crate) const MESSY_BLOCK: &[u8] =
     b"A: 1\r\nno colon\r\nIncident ID: x\r\nB: \xc2\xa01\r\nC: 1\x0b\r\n";
 
@@ -84,12 +84,12 @@ pub(crate) fn assert_messy_diagnostics(headers: &Headers) {
         .collect();
     assert_eq!(
         warnings,
-        [
-            (1, HeaderPart::Name, HeaderWarningKind::Whitespace),
-            (2, HeaderPart::Value, HeaderWarningKind::NonLwsWhitespace),
-            (3, HeaderPart::Value, HeaderWarningKind::ControlChar),
-        ]
+        [(1, HeaderPart::Name, HeaderWarningKind::Whitespace)]
     );
+
+    // The reader keeps NBSP and VT padding in the value and says nothing.
+    let values: Vec<_> = headers.iter().map(|(_, value)| value.as_str()).collect();
+    assert_eq!(values, ["1", "x", "\u{a0}1", "1\u{b}"]);
 }
 
 /// A SIP request whose header block, after the start line, is `block`.

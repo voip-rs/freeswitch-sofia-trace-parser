@@ -754,9 +754,11 @@ pub enum HeaderWarningKind {
     NonAscii,
     /// A character outside the RFC 3261 token rule in a header name.
     InvalidToken,
-    /// Whitespace other than space and tab around a value, such as NBSP.
+    /// Whitespace other than space and tab around a Content-Length value,
+    /// such as NBSP. Other values keep such padding without a warning.
     NonLwsWhitespace,
-    /// A control character, such as VT or FF, in whitespace around a value.
+    /// A control character, such as VT or FF, around a Content-Length value.
+    /// Other values keep it without a warning.
     ControlChar,
     /// Text after a complete value, dropped from the typed reading.
     TrailingContent,

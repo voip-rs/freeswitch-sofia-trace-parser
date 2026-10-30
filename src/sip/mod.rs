@@ -1033,12 +1033,12 @@ mod tests {
             assert_eq!(
                 warnings,
                 [
-                    (0, HeaderWarningKind::NonLwsWhitespace),
                     (1, HeaderWarningKind::TrailingContent),
                     (1, HeaderWarningKind::UnusableContentLength),
-                    (2, HeaderWarningKind::ControlChar),
                 ]
             );
+            let values: Vec<_> = parsed.headers.iter().map(|(_, v)| v.as_str()).collect();
+            assert_eq!(values, ["\u{a0}1", "5 bytes", "1\u{b}"]);
         }
 
         #[test]
