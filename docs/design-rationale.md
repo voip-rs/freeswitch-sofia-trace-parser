@@ -488,10 +488,11 @@ halves bind: a consumer filtering on one drops only what it has
 classified, and anything classified would have parsed, so rejecting
 before Level 3 hides no parse error.
 
-Level 3 splits its body at that same header-block boundary, so no byte
-falls between the halves. Level 2 keeps framing on CRLF pairs and
-Content-Length; on a malformed blank line the levels disagree by design,
-each still accounting for every byte.
+Level 2 frames on that same boundary, and Level 3 splits its body there,
+so the levels agree on where headers end, a bare-LF blank line included,
+and no byte falls between the halves. Both read Content-Length from the
+same rows through one rule (src/startline.rs), and a length in any doubt
+is no length: the message ends at its blank line rather than on a guess.
 
 One start-line grammar serves both levels, and it sits below them rather
 than inside Level 3, so Level 2 resynchronises on any request Level 3 would
