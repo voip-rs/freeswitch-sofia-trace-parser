@@ -94,6 +94,31 @@ The gap is the traffic mix: OPTIONS keep-alives are ~87% of messages in an
 ESInet trace, and INVITE requests under 0.2%. On such a trace the prefilter
 skips almost all header extraction.
 
+## Level 2 reads headers through sip-header's row walker
+
+Level 2 frames on Content-Length read from the same rows Level 3 sees, so it
+walks every header block with sip-header's lazy row walker rather than a
+byte scan of its own. The walk is the cost to watch: every row of every
+message is split and its name compared, to find one row. Two things keep it
+near the byte scan: the walk also yields the end of the headers, so there is
+no separate blank-line search, and a row name is only matched when its length
+could be Content-Length's.
+
+1 GB TCP dump, Level 2 only (`MessageIterator`), Zen 4, pinned, interleaved,
+against the byte scan it replaced:
+
+| build | instructions | elapsed |
+|---|---|---|
+| byte scan for Content-Length | 9.54 G | 0.76 s |
+| sip-header's full reader per message | 36.1 G | 2.15 s |
+| row walker, name-length gate, end of headers from the walk | 11.1 G | 0.88 s |
+
+A full parse (`--stats --all-methods`) costs the same as before the change,
+0.95x the instructions: the faster reader at Level 3 pays for Level 2's walk.
+Anyone moving Level 2 back to a byte scan of its own reintroduces a second
+reading of the headers that Level 3 has to agree with; bring numbers that
+show the walk is the bottleneck first.
+
 ## Memory
 
 Constant memory for inputs of any size, including multi-day dump chains (50GB+).
