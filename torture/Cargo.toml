@@ -10,5 +10,6 @@ freeswitch-sofia-trace-parser = { path = ".." }
 rayon = "1"
 
 [dev-dependencies]
+sip-uri = "0.3"
 eido = { git = "https://gitlab.cauca.ca/cauca-public/eido", features = ["xml"] }
-sip-header = "=1.0.0-beta.9" # each beta breaks the API; a caret would float onto the next
+sip-header = "1"

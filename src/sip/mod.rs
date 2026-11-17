@@ -15,7 +15,7 @@
 
 use std::borrow::Cow;
 
-use sip_header::{extract_header_block, Field, ParseWarning, Span};
+use sip_header::{Field, ParseWarning, SipMessageHeaders, Span};
 
 use crate::finders::CRLF;
 use crate::frame::ParseError;
@@ -144,7 +144,7 @@ impl SipMessage {
     }
 }
 
-/// Read the CSeq method the way `sip_header::extract_all_headers` reads
+/// Read the CSeq method the way `sip_header::SipMessageHeaders` reads
 /// headers, so the two cannot disagree: LF-separated lines, one optional
 /// trailing CR, stopping at the first blank line — which a bare LF pair can
 /// produce well before the `\r\n\r\n` that bounds the block.
@@ -353,25 +353,24 @@ pub(crate) enum FirstLine {
 /// The rows of a header block with no start line, and what its first line is.
 pub(crate) fn header_block(data: &[u8]) -> (Headers, FirstLine) {
     let block = bytes_to_str(data);
-    let extracted = extract_header_block(&block);
-    let first_line = match extracted.row_spans.first() {
-        None if extracted.skipped.is_empty() => FirstLine::Empty,
-        Some(row) if row.range().start == 0 && !name_warned_in(&extracted.warnings, row) => {
+    let extracted = SipMessageHeaders::from_header_block(&block);
+    let first_line = match extracted.row_spans().first() {
+        None if extracted.skipped().is_empty() => FirstLine::Empty,
+        Some(row) if row.range().start == 0 && !name_warned_in(extracted.warnings(), row) => {
             FirstLine::Header
         }
         _ => FirstLine::NotHeader,
     };
     let rows = extracted
-        .headers
-        .into_iter()
-        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .iter()
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
         .collect();
     let headers = Headers::parsed(
         rows,
         &block,
-        &extracted.skipped,
-        &extracted.row_spans,
-        &extracted.warnings,
+        extracted.skipped(),
+        extracted.row_spans(),
+        extracted.warnings(),
     );
     (headers, first_line)
 }

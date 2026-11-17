@@ -9,15 +9,16 @@ use std::path::Path;
 
 use freeswitch_sofia_trace_parser::MessageIterator;
 use freeswitch_sofia_trace_torture::{Corpus, Stats};
-use sip_header::sip_uri::{Uri, UriParse};
 use sip_header::{
-    extract_request_line, ContactList, FaultCode, HeaderParams, HeaderParse, HistoryInfo,
-    HistoryInfoEntry, ParseError, ParseWarning, SipAccept, SipAcceptEncoding, SipAcceptLanguage,
-    SipAuthValue, SipCallId, SipGeolocation, SipGeolocationEntry, SipHeader, SipHeaderAddr,
-    SipHeaderAddrList, SipHeaderLookup, SipHeaderRowsExt, SipJoin, SipMessageHeaders,
-    SipReasonList, SipReplaces, SipSecurity, SipTargetDialog, SipVia, SipViaEntry, SipWarning,
-    Span, SpanError, TokenList, TypedValue, UriInfo, UriInfoEntry, WarningCode, WarningKind,
+    extract_request_line, FaultCode, HeaderParams, HeaderParse, ParseError, ParseWarning,
+    SipAccept, SipAcceptEncoding, SipAcceptLanguage, SipAuthRows, SipCallId, SipContact,
+    SipGeolocation, SipGeolocationEntry, SipHeader, SipHeaderAddr, SipHeaderAddrList,
+    SipHeaderLookup, SipHeaderRowsExt, SipHistoryInfo, SipHistoryInfoEntry, SipJoin,
+    SipMessageHeaders, SipReason, SipReplaces, SipSecurity, SipTargetDialog, SipTokenList,
+    SipUriInfo, SipUriInfoEntry, SipVia, SipViaEntry, SipWarning, Span, SpanError, TypedValue,
+    WarningCode, WarningKind,
 };
+use sip_uri::{Uri, UriParse};
 
 const REQUEST_URI: &str = "Request-URI";
 
@@ -114,7 +115,7 @@ fn variant(debug: &str) -> &str {
 }
 
 fn kind(w: &ParseWarning) -> &'static str {
-    match w.kind {
+    match w.kind() {
         WarningKind::Lost => "Lost",
         WarningKind::Recovered => "Recovered",
         _ => "other",
@@ -304,7 +305,7 @@ macro_rules! walk_list_params {
 walk_plain!(SipCallId, SipWarning);
 walk_params!(SipReplaces, SipJoin, SipTargetDialog);
 walk_list_params!(
-    SipReasonList,
+    SipReason,
     SipSecurity,
     SipAccept,
     SipAcceptEncoding,
@@ -331,7 +332,7 @@ impl Walk for SipHeaderAddrList {
     }
 }
 
-impl Walk for ContactList {
+impl Walk for SipContact {
     fn walk(&self, c: &mut Check<'_, '_>) {
         for a in self.iter() {
             c.addr(a);
@@ -342,10 +343,10 @@ impl Walk for ContactList {
     }
 }
 
-impl Walk for UriInfo {
+impl Walk for SipUriInfo {
     fn walk(&self, c: &mut Check<'_, '_>) {
         for e in self.iter() {
-            c.reparse("entry", e.span(), e, |s| UriInfoEntry::parse(s).ok());
+            c.reparse("entry", e.span(), e, |s| SipUriInfoEntry::parse(s).ok());
             c.uri(e.uri_span(), e.uri());
             c.params(e.params());
         }
@@ -355,10 +356,10 @@ impl Walk for UriInfo {
     }
 }
 
-impl Walk for HistoryInfo {
+impl Walk for SipHistoryInfo {
     fn walk(&self, c: &mut Check<'_, '_>) {
         for e in self.iter() {
-            c.reparse("entry", e.span(), e, |s| HistoryInfoEntry::parse(s).ok());
+            c.reparse("entry", e.span(), e, |s| SipHistoryInfoEntry::parse(s).ok());
             c.uri(e.uri_span(), e.uri());
             c.params(e.params());
         }
@@ -394,7 +395,7 @@ impl Walk for SipVia {
     }
 }
 
-impl Walk for Vec<SipAuthValue> {
+impl Walk for SipAuthRows {
     fn walk(&self, c: &mut Check<'_, '_>) {
         for v in self {
             c.params(v.params());
@@ -405,11 +406,11 @@ impl Walk for Vec<SipAuthValue> {
     }
 }
 
-impl Walk for TokenList {
+impl Walk for SipTokenList {
     fn walk(&self, _: &mut Check<'_, '_>) {}
     fn round_trip(&self, header: Option<SipHeader>) -> Option<&'static str> {
         let header = header?;
-        match TokenList::parse_strict(header, &self.to_string()) {
+        match SipTokenList::parse_strict(header, &self.to_string()) {
             Err(_) => Some("strict-err"),
             Ok(back) if back != *self => Some("unequal"),
             Ok(_) => None,

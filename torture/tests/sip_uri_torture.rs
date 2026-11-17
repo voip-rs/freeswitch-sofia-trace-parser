@@ -4,8 +4,8 @@ use std::path::Path;
 use freeswitch_sofia_trace_parser::types::SipMessageType;
 use freeswitch_sofia_trace_parser::ParsedMessageIterator;
 use freeswitch_sofia_trace_torture::{Corpus, Stats};
-use sip_header::sip_uri::{Uri, UriParse};
 use sip_header::{HeaderParse, SipHeaderAddr};
+use sip_uri::{Uri, UriParse};
 
 const NAMEADDR_HEADERS: &[&str] = &[
     "from",
