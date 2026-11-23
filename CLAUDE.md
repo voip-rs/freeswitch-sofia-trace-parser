@@ -16,7 +16,8 @@ This is a **library-first** crate. `src/bin/main.rs` is a sample (but complete) 
 - **No `pub mod` names that shadow `std`** (e.g. don't name a module `fmt`, `io`,
   `collections`).
 - **Never expose dependency types in public signatures.** A dependency major-version
-  bump becomes a semver break if its types leak into the public API.
+  bump becomes a semver break if its types leak into the public API. Exception:
+  a crate whose contract forbids a major (`sip-header-diagnostics`).
 - **Never expose a layout the crate chose.** A type the crate produces and the
   caller only reads keeps its fields private behind accessors, so the
   representation can change without a bump. A type the caller constructs or

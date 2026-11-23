@@ -316,7 +316,10 @@ Rules that emerged from production use:
 
 - **Never expose dependency types in public signatures.** A dependency
   major-version bump becomes a semver break if its types leak into the
-  public API. All public signatures use standard library types.
+  public API. The exception is a crate whose own contract rules out a
+  major, such as sip-header's diagnostics crate: its warning codes are
+  handed out as they are rather than mirrored, since a mirror collapses
+  every code it does not name.
 
 - **Loss reaches the caller, never only the log.** Every loss is a
   returned error or a parse-statistics count, so the library logs a
