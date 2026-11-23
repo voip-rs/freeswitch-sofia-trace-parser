@@ -714,9 +714,21 @@ pub struct HeaderWarning {
     row: usize,
     part: HeaderPart,
     kind: HeaderWarningKind,
+    code: Option<WarningCode>,
 }
 
 impl HeaderWarning {
+    fn from_code(row: usize, part: HeaderPart, code: WarningCode) -> Self {
+        let kind = warning_kind(code);
+        let code = Some(code);
+        HeaderWarning {
+            row,
+            part,
+            kind,
+            code,
+        }
+    }
+
     /// Index of the row the breach is in.
     pub fn row(&self) -> usize {
         self.row
@@ -730,6 +742,13 @@ impl HeaderWarning {
     /// What is wrong with it.
     pub fn kind(&self) -> HeaderWarningKind {
         self.kind
+    }
+
+    /// The code sip-header reported the breach under, which [`kind`](Self::kind)
+    /// may fold into [`HeaderWarningKind::Other`]. `None` for the
+    /// Content-Length kinds, which this crate reports on its own.
+    pub fn code(&self) -> Option<WarningCode> {
+        self.code
     }
 }
 
@@ -832,11 +851,7 @@ impl Headers {
             .iter()
             .map(|w| {
                 let row = warning_row(row_spans, w);
-                let warning = HeaderWarning {
-                    row,
-                    part: warning_part(w.field),
-                    kind: warning_kind(w.code),
-                };
+                let warning = HeaderWarning::from_code(row, warning_part(w.field), w.code);
                 (row, warning_at(w), warning)
             })
             .collect();
@@ -847,9 +862,8 @@ impl Headers {
                 .map(|(row, (_, value))| (row, Some(Cow::Borrowed(value.as_str())))),
         );
         located.extend(reading.typed_warnings.into_iter().map(|(row, code)| {
-            let part = HeaderPart::Value;
-            let kind = warning_kind(code);
-            (row, usize::MAX - 1, HeaderWarning { row, part, kind })
+            let warning = HeaderWarning::from_code(row, HeaderPart::Value, code);
+            (row, usize::MAX - 1, warning)
         }));
         located.extend(reading.reports.into_iter().map(|(row, report)| {
             let kind = match report {
@@ -857,7 +871,17 @@ impl Headers {
                 RowReport::Unusable => HeaderWarningKind::UnusableContentLength,
             };
             let part = HeaderPart::Value;
-            (row, usize::MAX, HeaderWarning { row, part, kind })
+            let code = None;
+            (
+                row,
+                usize::MAX,
+                HeaderWarning {
+                    row,
+                    part,
+                    kind,
+                    code,
+                },
+            )
         }));
         located.sort_by_key(|(row, at, _)| (*row, *at));
         let warnings = located.into_iter().map(|(_, _, w)| w).collect();

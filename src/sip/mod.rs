@@ -1041,6 +1041,34 @@ mod tests {
         }
 
         #[test]
+        fn a_warning_names_the_code_its_kind_folds_away() {
+            use sip_header_diagnostics::WarningCode;
+            let parsed = request_with_block(b"A\x01b: 1\r\nContent-Length: 5 bytes\r\n");
+            let warnings: Vec<_> = parsed
+                .headers
+                .warnings()
+                .iter()
+                .map(|w| (w.row(), w.kind(), w.code()))
+                .collect();
+            assert_eq!(
+                warnings,
+                [
+                    (
+                        0,
+                        HeaderWarningKind::Other,
+                        Some(WarningCode::HeaderNameControl)
+                    ),
+                    (
+                        1,
+                        HeaderWarningKind::TrailingContent,
+                        Some(WarningCode::TrailingContent)
+                    ),
+                    (1, HeaderWarningKind::UnusableContentLength, None),
+                ]
+            );
+        }
+
+        #[test]
         fn content_length_of_a_message_is_none_unless_rows_agree() {
             let length = |block: &[u8]| request_with_block(block).content_length();
             assert_eq!(length(b"l: 5\r\nContent-Length: 5\r\n"), Some(5));
