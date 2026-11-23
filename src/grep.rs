@@ -1,4 +1,5 @@
 use std::io::{BufRead, BufReader, Read};
+use std::panic::AssertUnwindSafe;
 
 /// A [`Read`] adapter that strips `grep -C` separator lines (`--\n`) from the
 /// input stream.
@@ -35,6 +36,11 @@ pub struct GrepFilter<R> {
     /// a BufReader buffer boundary.
     partial: Vec<u8>,
     partial_pos: usize,
+    /// A read failure met after bytes were already copied out, returned on
+    /// the next call so neither the bytes nor the failure are lost. The
+    /// wrapper keeps GrepFilter unwind-safe, which io::Error is not; a panic
+    /// can at worst leave an error still pending, never a broken invariant.
+    pending_error: AssertUnwindSafe<Option<std::io::Error>>,
 }
 
 impl<R: Read> GrepFilter<R> {
@@ -44,6 +50,7 @@ impl<R: Read> GrepFilter<R> {
             inner: BufReader::new(reader),
             partial: Vec::new(),
             partial_pos: 0,
+            pending_error: AssertUnwindSafe(None),
         }
     }
 }
@@ -67,10 +74,21 @@ impl<R: Read> Read for GrepFilter<R> {
             return Ok(n);
         }
 
+        if let Some(e) = self.pending_error.take() {
+            return Err(e);
+        }
+
         let mut filled = 0;
 
         loop {
-            let buf = self.inner.fill_buf()?;
+            let buf = match self.inner.fill_buf() {
+                Ok(buf) => buf,
+                Err(e) if filled > 0 => {
+                    *self.pending_error = Some(e);
+                    return Ok(filled);
+                }
+                Err(e) => return Err(e),
+            };
             if buf.is_empty() {
                 return Ok(filled);
             }
@@ -141,6 +159,12 @@ mod tests {
             grep.read(&mut out).is_err(),
             "the failure still reaches the caller"
         );
+    }
+
+    #[test]
+    fn grep_filter_stays_unwind_safe() {
+        fn unwind_safe<T: std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
+        unwind_safe::<GrepFilter<&[u8]>>();
     }
 
     #[test]
