@@ -308,6 +308,12 @@ const READ_BUF_SIZE: usize = 32 * 1024;
 /// boundaries. Handles truncated first/last frames, file concatenation,
 /// and garbage recovery.
 ///
+/// A failed read ends the input. The error is yielded once as
+/// [`ParseError::Io`]; the bytes buffered before it are then drained as at
+/// end of file, a cut-off frame coming out short and counted in
+/// [`ParseStats::incomplete_frames`], and iteration ends. Reading is never
+/// retried, except on [`ErrorKind::Interrupted`](std::io::ErrorKind::Interrupted).
+///
 /// # Example
 ///
 /// ```no_run
@@ -402,13 +408,28 @@ impl<R: Read> FrameIterator<R> {
         self.consume(n);
     }
 
+    /// A failed read ends the input: the error is returned once, and the
+    /// buffered tail is then drained as at end of file.
     fn fill_buf(&mut self) -> Result<bool, std::io::Error> {
         if self.eof {
             return Ok(false);
         }
         let old_len = self.buf.len();
         self.buf.resize(old_len + READ_BUF_SIZE, 0);
-        let n = self.reader.read(&mut self.buf[old_len..])?;
+        let read = loop {
+            match self.reader.read(&mut self.buf[old_len..]) {
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                other => break other,
+            }
+        };
+        let n = match read {
+            Ok(n) => n,
+            Err(e) => {
+                self.buf.truncate(old_len);
+                self.eof = true;
+                return Err(e);
+            }
+        };
         self.buf.truncate(old_len + n);
         if n == 0 {
             self.eof = true;
