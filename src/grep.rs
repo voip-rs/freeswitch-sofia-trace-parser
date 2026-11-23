@@ -125,6 +125,25 @@ mod tests {
     }
 
     #[test]
+    fn bytes_copied_before_a_failed_read_are_returned() {
+        use crate::test_reader::{ScriptedReader, Step};
+        use std::io::ErrorKind;
+
+        let inner = ScriptedReader::new(
+            vec![Step::Data(b"line one\n"), Step::Fail(ErrorKind::Other)],
+            None,
+        );
+        let mut grep = GrepFilter::new(inner);
+        let mut out = [0u8; 64];
+        let n = grep.read(&mut out).unwrap();
+        assert_eq!(&out[..n], b"line one\n");
+        assert!(
+            grep.read(&mut out).is_err(),
+            "the failure still reaches the caller"
+        );
+    }
+
+    #[test]
     fn strip_separator() {
         assert_eq!(filter(b"hello\n--\nworld\n"), b"hello\nworld\n");
     }

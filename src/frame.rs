@@ -780,7 +780,9 @@ impl<R: Read> Iterator for FrameIterator<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_reader::{ScriptedReader, Step};
     use crate::types::SkipTracking;
+    use std::io::ErrorKind;
 
     #[test]
     fn parse_recv_ipv4_tcp() {
@@ -957,6 +959,71 @@ mod tests {
             .unwrap();
         assert_eq!(frames[0].offset, 0);
         assert_eq!(frames[1].offset, first.len() as u64);
+    }
+
+    const HELLO: &[u8] = b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n";
+    const WORLD: &[u8] = b"sent 5 bytes to tcp/1.1.1.1:5060 at 00:00:00.000001:\nworld\x0B\n";
+
+    #[test]
+    fn a_read_error_is_reported_once_and_ends_the_input() {
+        let reader = ScriptedReader::new(
+            vec![
+                Step::Data(HELLO),
+                Step::Fail(ErrorKind::Other),
+                Step::Data(WORLD),
+            ],
+            None,
+        );
+        let mut iter = FrameIterator::new(reader);
+        assert_eq!(iter.next().unwrap().unwrap().content, b"hello");
+        assert!(matches!(iter.next(), Some(Err(ParseError::Io(_)))));
+        assert!(iter.next().is_none());
+        assert_eq!(
+            iter.stats().bytes_skipped(),
+            0,
+            "skipped bytes no read produced"
+        );
+    }
+
+    #[test]
+    fn a_reader_that_always_fails_ends_the_iteration() {
+        let reader = ScriptedReader::new(vec![], Some(ErrorKind::IsADirectory));
+        let mut iter = FrameIterator::new(reader);
+        let items: Vec<_> = iter.by_ref().take(4).collect();
+        assert_eq!(items.len(), 1, "one error, then the end");
+        assert!(matches!(items[0], Err(ParseError::Io(_))));
+        assert!(iter.buf.is_empty(), "buffered {} bytes", iter.buf.len());
+    }
+
+    #[test]
+    fn an_interrupted_read_is_retried() {
+        let reader = ScriptedReader::new(
+            vec![Step::Fail(ErrorKind::Interrupted), Step::Data(HELLO)],
+            None,
+        );
+        let frames: Vec<Frame> = FrameIterator::new(reader)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].content, b"hello");
+    }
+
+    #[test]
+    fn a_read_error_mid_frame_leaves_an_incomplete_frame() {
+        let reader = ScriptedReader::new(
+            vec![
+                Step::Data(b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhel"),
+                Step::Fail(ErrorKind::Other),
+                Step::Data(b"lo\x0B\n"),
+            ],
+            None,
+        );
+        let mut iter = FrameIterator::new(reader);
+        assert!(matches!(iter.next(), Some(Err(ParseError::Io(_)))));
+        assert_eq!(iter.next().unwrap().unwrap().content, b"hel");
+        assert!(iter.next().is_none());
+        assert_eq!(iter.stats().incomplete_frames(), 1);
+        assert_eq!(iter.stats().incomplete_frame_bytes(), 2);
     }
 
     #[test]
