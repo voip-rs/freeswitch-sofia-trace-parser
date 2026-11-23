@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read};
-use std::process;
+use std::process::{self, ExitCode};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{Parser, ValueEnum};
 use regex::Regex;
@@ -623,7 +624,10 @@ fn run_stats(
                 let matched = filters.matches(&msg);
                 counts.record(&msg, matched);
             }
-            Err(_) => counts.record_error(),
+            Err(ref e) => {
+                note_read_failure(e);
+                counts.record_error();
+            }
         }
     }
     counts.input = iter.parse_stats().clone();
@@ -816,7 +820,18 @@ fn run_dialog(
     iter.parse_stats().clone()
 }
 
+/// Set once the input could not be read to its end, so the exit status
+/// tells a cut-short run from a complete one.
+static INPUT_FAILED: AtomicBool = AtomicBool::new(false);
+
+fn note_read_failure(e: &ParseError) {
+    if matches!(e, ParseError::Io(_)) {
+        INPUT_FAILED.store(true, Ordering::Relaxed);
+    }
+}
+
 fn log_parse_error(context: &str, e: &ParseError) {
+    note_read_failure(e);
     match e {
         ParseError::TransportNoise { .. } => debug!("{context}: {e}"),
         _ => warn!("{context}: {e}"),
@@ -898,7 +913,7 @@ fn validate(cli: &Cli) {
     }
 }
 
-fn main() {
+fn main() -> ExitCode {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
     validate(&cli);
@@ -919,6 +934,12 @@ fn main() {
 
     if cli.unparsed {
         print_unparsed(&stats);
+    }
+
+    if INPUT_FAILED.load(Ordering::Relaxed) {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
