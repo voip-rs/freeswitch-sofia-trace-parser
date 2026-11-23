@@ -2,7 +2,8 @@ use std::borrow::Cow;
 use std::fmt;
 use std::net::SocketAddr;
 
-use sip_header::{Field, ParseWarning, Span, WarningCode};
+use sip_header::{Field, ParseWarning, Span};
+use sip_header_diagnostics::WarningCode;
 
 use crate::startline::{is_content_length_name, read_content_length, ContentLength, RowReport};
 
@@ -1352,7 +1353,7 @@ mod tests {
 
     #[test]
     fn warning_codes_map_to_their_kind() {
-        use sip_header::WarningCode as C;
+        use sip_header_diagnostics::WarningCode as C;
         let cases = [
             (C::HeaderNameWhitespace, HeaderWarningKind::Whitespace),
             (C::NonAscii, HeaderWarningKind::NonAscii),

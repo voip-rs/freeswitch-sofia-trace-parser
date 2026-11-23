@@ -11,7 +11,8 @@
 
 use std::borrow::Cow;
 
-use sip_header::{HeaderParse, NameMatcher, SipContentLength, SipHeader, WarningCode};
+use sip_header::{HeaderParse, NameMatcher, SipContentLength, SipHeader};
+use sip_header_diagnostics::WarningCode;
 
 use crate::frame::ParseError;
 use crate::types::SipMessageType;
