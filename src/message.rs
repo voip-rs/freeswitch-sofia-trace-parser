@@ -23,7 +23,8 @@ const EVICTION_SAMPLE: usize = 4;
 /// available. UDP frames pass through as-is (1:1 mapping).
 ///
 /// Stale TCP connection buffers are evicted after 2 hours of inactivity to
-/// maintain constant memory on multi-day dump streams.
+/// maintain constant memory on multi-day dump streams. A live connection's
+/// buffer is bounded only by [`max_message_len`](Self::max_message_len).
 ///
 /// # Example
 ///
@@ -175,6 +176,8 @@ impl<R: std::io::Read> MessageIterator<R> {
         stats.non_sip_prefixes += loss.count;
         stats.non_sip_prefix_bytes += loss.bytes;
         stats.unusable_content_lengths += loss.unusable_lengths;
+        stats.oversized_buffers += loss.oversized_buffers;
+        stats.oversized_buffer_bytes += loss.oversized_bytes;
     }
 }
 
@@ -246,6 +249,19 @@ impl<R: std::io::Read> Iterator for MessageIterator<R> {
 
                     let mut loss = FramingLoss::default();
                     extract_complete(buf, &key, &mut self.ready, &mut loss);
+                    if self
+                        .max_message_len
+                        .is_some_and(|max| buf.content.len() > max)
+                    {
+                        debug!(
+                            bytes = buf.content.len(),
+                            address = %key.address,
+                            "dropped connection buffer past max_message_len"
+                        );
+                        loss.oversized_buffers += 1;
+                        loss.oversized_bytes += buf.content.len() as u64;
+                        buf.content.clear();
+                    }
 
                     if buf.content.is_empty() {
                         self.buffers.remove(&key);
@@ -274,13 +290,16 @@ enum Resync {
     Wait,
 }
 
-/// Bytes dropped resyncing a buffer and lengths refused framing it, tallied
+/// Bytes dropped resyncing a buffer or past max_message_len, and lengths
+/// refused framing it, tallied
 /// into [`ParseStats`] once the caller is done borrowing the buffer map.
 #[derive(Default)]
 struct FramingLoss {
     count: u64,
     bytes: u64,
     unusable_lengths: u64,
+    oversized_buffers: u64,
+    oversized_bytes: u64,
 }
 
 /// Move every message the buffer already holds in full into `ready`.
