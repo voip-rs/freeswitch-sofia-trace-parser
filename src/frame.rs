@@ -266,6 +266,13 @@ enum HeaderStep {
     Failed(ParseError),
 }
 
+enum ContentStep {
+    Got(Frame),
+    /// No boundary within max_frame_len: the frame was skipped.
+    Dropped,
+    Failed(ParseError),
+}
+
 /// Distinguish a header still arriving from one the parser rejects.
 fn classify_header(data: &[u8]) -> HeaderParse {
     match parse_frame_header(data) {
@@ -307,6 +314,17 @@ pub fn is_frame_header(data: &[u8]) -> bool {
     rest[space..].starts_with(b" bytes ")
 }
 
+/// Bytes [`is_frame_header`] may need past a `\x0B`: the `\n`, `recv `, ten
+/// digits and ` bytes `, plus the `\x0B` itself.
+const BOUNDARY_PROBE: usize = 1 + 1 + 5 + 10 + 7;
+
+/// Where the tail starts that may hold a boundary not yet validated: the
+/// first `\x0B` among the last [`BOUNDARY_PROBE`] bytes, else the end.
+fn boundary_tail(buf: &[u8]) -> usize {
+    let window = buf.len().saturating_sub(BOUNDARY_PROBE);
+    memchr::memchr(0x0B, &buf[window..]).map_or(buf.len(), |p| window + p)
+}
+
 const READ_BUF_SIZE: usize = 32 * 1024;
 
 /// Level 1 streaming parser: splits raw dump bytes into [`Frame`]s.
@@ -320,6 +338,12 @@ const READ_BUF_SIZE: usize = 32 * 1024;
 /// end of file, a cut-off frame coming out short and counted in
 /// [`ParseStats::incomplete_frames`], and iteration ends. Reading is never
 /// retried, except on [`ErrorKind::Interrupted`](std::io::ErrorKind::Interrupted).
+///
+/// Memory stays near [`max_frame_len`](Self::max_frame_len) plus one read,
+/// whatever the input. A first header, a frame's boundary or a header's
+/// newline not found within that bound gives up on the frame: its bytes,
+/// up to the next `\x0B\n` and valid header, are skipped and counted as one
+/// [`SkipReason::OversizedFrame`] region, and no error is yielded for it.
 ///
 /// # Example
 ///
@@ -343,6 +367,8 @@ pub struct FrameIterator<R> {
     stats: ParseStats,
     skip_tracking: SkipTracking,
     max_frame_len: usize,
+    /// Set once a frame ran past max_frame_len, until the next header.
+    skipping_oversized: bool,
 }
 
 impl<R: Read> FrameIterator<R> {
@@ -357,6 +383,7 @@ impl<R: Read> FrameIterator<R> {
             stats: ParseStats::default(),
             skip_tracking: SkipTracking::CountOnly,
             max_frame_len: DEFAULT_MAX_FRAME_LEN,
+            skipping_oversized: false,
         }
     }
 
@@ -406,22 +433,50 @@ impl<R: Read> FrameIterator<R> {
         self.offset += n as u64;
     }
 
+    /// An oversized run skipped in bound-sized pieces is recorded as one
+    /// region, extending the previous one when it ends where this one starts.
     fn consume_skipped(&mut self, n: usize, reason: SkipReason) {
         if self.skip_tracking != SkipTracking::CountOnly {
-            let data = if self.skip_tracking == SkipTracking::CaptureData {
-                Some(self.buf[..n].to_vec())
-            } else {
-                None
-            };
-            self.stats.unparsed_regions.push(UnparsedRegion {
-                offset: self.offset,
-                length: n as u64,
-                reason,
-                data,
-            });
+            let skipped = &self.buf[..n];
+            let capture = self.skip_tracking == SkipTracking::CaptureData;
+            match self.stats.unparsed_regions.last_mut() {
+                Some(last)
+                    if reason == SkipReason::OversizedFrame
+                        && last.reason == reason
+                        && last.offset + last.length == self.offset =>
+                {
+                    last.length += n as u64;
+                    if let Some(data) = last.data.as_mut() {
+                        data.extend_from_slice(skipped);
+                    }
+                }
+                _ => self.stats.unparsed_regions.push(UnparsedRegion {
+                    offset: self.offset,
+                    length: n as u64,
+                    reason,
+                    data: capture.then(|| skipped.to_vec()),
+                }),
+            }
         }
         self.stats.bytes_skipped += n as u64;
         self.consume(n);
+    }
+
+    /// Skip everything but the tail that may still begin a `\x0B\n` boundary,
+    /// once the buffer passed max_frame_len without finding what it sought.
+    fn skip_oversized(&mut self) {
+        let keep_from = boundary_tail(&self.buf);
+        debug!(
+            offset = self.offset,
+            skipped_bytes = keep_from,
+            "no frame boundary within max_frame_len"
+        );
+        self.consume_skipped(keep_from, SkipReason::OversizedFrame);
+        self.skipping_oversized = true;
+    }
+
+    fn over_bound(&self, from: usize) -> bool {
+        self.buf.len().saturating_sub(from) > self.max_frame_len
     }
 
     /// A failed read ends the input: the error is returned once, and the
@@ -491,13 +546,14 @@ impl<R: Read> FrameIterator<R> {
         }
     }
 
-    /// Skip to the first valid frame header in the buffer (for partial first frames).
-    fn skip_to_first_header(&mut self) -> Option<usize> {
-        if is_frame_header(&self.buf) {
+    /// Position of the first valid frame header at or past `from`, which is
+    /// 0 or a position a previous search left unresolved.
+    fn skip_to_first_header(&self, from: usize) -> Option<usize> {
+        if from == 0 && is_frame_header(&self.buf) {
             return Some(0);
         }
         // Look for \x0B\n followed by a valid header
-        let mut search_from = 0;
+        let mut search_from = from;
         loop {
             let pos = BOUNDARY.find(&self.buf[search_from..])?;
             let abs_pos = search_from + pos;
@@ -510,30 +566,47 @@ impl<R: Read> FrameIterator<R> {
         }
     }
 
-    /// Drop a partial first frame so the buffer starts at a frame header.
+    /// Drop a partial first frame, or the rest of an oversized one, so the
+    /// buffer starts at a frame header.
     fn sync_to_first_header(&mut self) -> SyncStep {
+        let mut from = 0;
         loop {
-            match self.skip_to_first_header() {
+            match self.skip_to_first_header(from) {
                 Some(offset) => {
                     if offset > 0 {
-                        let reason = if offset <= MAX_PARTIAL_FRAME {
+                        let reason = if offset <= MAX_PARTIAL_FRAME && !self.skipping_oversized {
                             SkipReason::PartialFirstFrame
                         } else {
                             SkipReason::OversizedFrame
                         };
                         self.consume_skipped(offset, reason);
                     }
+                    self.skipping_oversized = false;
                     return SyncStep::Ready;
                 }
                 None => {
                     if self.eof {
-                        debug!("no valid frame header found in entire input");
+                        debug!("no valid frame header found in rest of input");
                         let remaining = self.buf.len();
                         if remaining > 0 {
-                            self.consume_skipped(remaining, SkipReason::InvalidHeader);
+                            let reason = if self.skipping_oversized {
+                                SkipReason::OversizedFrame
+                            } else {
+                                SkipReason::InvalidHeader
+                            };
+                            self.consume_skipped(remaining, reason);
                         }
                         return SyncStep::End;
                     }
+                    if self.over_bound(0) {
+                        self.skip_oversized();
+                    }
+                    // A shorter buffer may yet hold a header at its start.
+                    from = if self.buf.len() < BOUNDARY_PROBE {
+                        0
+                    } else {
+                        boundary_tail(&self.buf)
+                    };
                     if let Err(e) = self.fill_buf() {
                         return SyncStep::Failed(ParseError::Io(e));
                     }
@@ -575,6 +648,10 @@ impl<R: Read> FrameIterator<R> {
                             self.consume_skipped(remaining, SkipReason::InvalidHeader);
                         }
                         return HeaderStep::End;
+                    }
+                    if self.over_bound(0) {
+                        self.skip_oversized();
+                        return HeaderStep::Restart;
                     }
                     if let Err(e) = self.fill_buf() {
                         return HeaderStep::Failed(ParseError::Io(e));
@@ -643,11 +720,7 @@ impl<R: Read> FrameIterator<R> {
     }
 
     /// Read one frame's content, from the header's end to the frame boundary.
-    fn read_content(
-        &mut self,
-        header: FrameHeader,
-        offset: u64,
-    ) -> Option<Result<Frame, ParseError>> {
+    fn read_content(&mut self, header: FrameHeader, offset: u64) -> ContentStep {
         let FrameHeader {
             direction,
             byte_count,
@@ -663,14 +736,16 @@ impl<R: Read> FrameIterator<R> {
         // Strategy: first check at the expected position (content_start + byte_count),
         // then fall back to scanning. This handles file concatenation where \x0B\n
         // is followed by garbage from the next file's truncated first frame.
+        let mut scan_from = content_start;
         let content = loop {
             // Ensure we have enough data to check the expected position, but
             // never buffer a declared count further than a frame can reach:
             // past that, boundary scanning takes over.
-            let fill_to = (expected_end + 1).min(content_start + MAX_PARTIAL_FRAME);
+            let reach = MAX_PARTIAL_FRAME.min(self.max_frame_len);
+            let fill_to = (expected_end + 1).min(content_start + reach);
             while self.buf.len() <= fill_to && !self.eof {
                 if let Err(e) = self.fill_buf() {
-                    return Some(Err(ParseError::Io(e)));
+                    return ContentStep::Failed(ParseError::Io(e));
                 }
             }
 
@@ -694,7 +769,7 @@ impl<R: Read> FrameIterator<R> {
             }
 
             // Fall back to scanning for \x0B\n + valid header
-            if let Some(boundary_pos) = self.find_boundary(content_start) {
+            if let Some(boundary_pos) = self.find_boundary(scan_from) {
                 let content = self.buf[content_start..boundary_pos].to_vec();
                 let drain_to = boundary_pos + 2;
                 self.consume(drain_to);
@@ -755,12 +830,17 @@ impl<R: Read> FrameIterator<R> {
                 break content;
             }
 
+            if self.over_bound(content_start) {
+                self.skip_oversized();
+                return ContentStep::Dropped;
+            }
+            scan_from = boundary_tail(&self.buf).max(content_start);
             if let Err(e) = self.fill_buf() {
-                return Some(Err(ParseError::Io(e)));
+                return ContentStep::Failed(ParseError::Io(e));
             }
         };
 
-        Some(Ok(Frame {
+        ContentStep::Got(Frame {
             direction,
             byte_count,
             transport,
@@ -768,7 +848,7 @@ impl<R: Read> FrameIterator<R> {
             timestamp,
             content,
             offset,
-        }))
+        })
     }
 }
 
@@ -776,7 +856,25 @@ impl<R: Read> Iterator for FrameIterator<R> {
     type Item = Result<Frame, ParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let (header, start) = loop {
+        loop {
+            let (header, start) = match self.next_header()? {
+                Ok(found) => found,
+                Err(e) => return Some(Err(e)),
+            };
+            match self.read_content(header, start) {
+                ContentStep::Got(frame) => return Some(Ok(frame)),
+                ContentStep::Dropped => continue,
+                ContentStep::Failed(e) => return Some(Err(e)),
+            }
+        }
+    }
+}
+
+impl<R: Read> FrameIterator<R> {
+    /// The next frame header and the offset it starts at, syncing past a
+    /// partial first frame or the rest of an oversized one.
+    fn next_header(&mut self) -> Option<Result<(FrameHeader, u64), ParseError>> {
+        loop {
             if self.buf.is_empty() && !self.eof {
                 if let Err(e) = self.fill_buf() {
                     return Some(Err(ParseError::Io(e)));
@@ -786,7 +884,7 @@ impl<R: Read> Iterator for FrameIterator<R> {
                 return None;
             }
 
-            if self.frame_count == 0 {
+            if self.frame_count == 0 || self.skipping_oversized {
                 match self.sync_to_first_header() {
                     SyncStep::Ready => {}
                     SyncStep::End => return None,
@@ -803,14 +901,12 @@ impl<R: Read> Iterator for FrameIterator<R> {
             // frame's position is its header's, not its content's.
             let start = self.offset;
             match self.read_header() {
-                HeaderStep::Got(header) => break (header, start),
+                HeaderStep::Got(header) => return Some(Ok((header, start))),
                 HeaderStep::Restart => continue,
                 HeaderStep::End => return None,
                 HeaderStep::Failed(e) => return Some(Err(e)),
             }
-        };
-
-        self.read_content(header, start)
+        }
     }
 }
 
