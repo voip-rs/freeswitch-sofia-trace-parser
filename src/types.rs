@@ -124,6 +124,8 @@ pub struct ParseStats {
     pub(crate) incomplete_frame_bytes: u64,
     pub(crate) stale_evictions: u64,
     pub(crate) stale_evicted_bytes: u64,
+    pub(crate) oversized_buffers: u64,
+    pub(crate) oversized_buffer_bytes: u64,
     pub(crate) non_sip_prefixes: u64,
     pub(crate) non_sip_prefix_bytes: u64,
     pub(crate) unusable_content_lengths: u64,
@@ -163,6 +165,18 @@ impl ParseStats {
     /// Bytes those buffers were holding.
     pub fn stale_evicted_bytes(&self) -> u64 {
         self.stale_evicted_bytes
+    }
+
+    /// Connection buffers dropped for passing
+    /// [`MessageIterator::max_message_len`](crate::MessageIterator::max_message_len)
+    /// with their message still incomplete.
+    pub fn oversized_buffers(&self) -> u64 {
+        self.oversized_buffers
+    }
+
+    /// Bytes those buffers were holding.
+    pub fn oversized_buffer_bytes(&self) -> u64 {
+        self.oversized_buffer_bytes
     }
 
     /// Times a TCP buffer resynchronised past bytes that began no SIP message.

@@ -75,7 +75,7 @@ pub mod sip;
 /// Core data types shared across all parsing levels.
 pub mod types;
 
-pub use frame::{FrameIterator, ParseError};
+pub use frame::{FrameIterator, ParseError, DEFAULT_MAX_FRAME_LEN};
 pub use grep::GrepFilter;
 pub use message::MessageIterator;
 #[cfg(feature = "pcap")]

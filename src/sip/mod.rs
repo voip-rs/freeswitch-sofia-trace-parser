@@ -235,6 +235,19 @@ impl<R: std::io::Read> ParsedMessageIterator<R> {
         self
     }
 
+    /// Bound on one frame, see [`FrameIterator::max_frame_len`](crate::FrameIterator::max_frame_len).
+    pub fn max_frame_len(mut self, len: usize) -> Self {
+        self.inner = self.inner.max_frame_len(len);
+        self
+    }
+
+    /// Bound on one pending TCP message, see
+    /// [`MessageIterator::max_message_len`].
+    pub fn max_message_len(mut self, len: usize) -> Self {
+        self.inner = self.inner.max_message_len(len);
+        self
+    }
+
     /// Borrow the accumulated parse statistics.
     pub fn parse_stats(&self) -> &ParseStats {
         self.inner.parse_stats()

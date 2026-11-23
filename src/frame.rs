@@ -15,6 +15,13 @@ const SENT_PREFIX: &[u8] = b"sent ";
 /// Based on IP max datagram size (65535) plus the `\x0B\n` boundary (2 bytes).
 const MAX_PARTIAL_FRAME: usize = 65537;
 
+/// Default for [`FrameIterator::max_frame_len`]. A sent frame is one
+/// `send()` of at most one message, which sofia-sip's nta caps at 2 MiB by
+/// default; a TCP recv frame is one read of whatever the kernel had queued,
+/// bounded by the socket receive buffer (Linux defaults its maximum to
+/// 6 MiB). A host tuned past that needs a larger bound.
+pub const DEFAULT_MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+
 /// Errors produced during frame parsing (Level 1) and SIP parsing (Level 3).
 ///
 /// Returned as `Iterator::Item = Result<T, ParseError>`. The caller decides
@@ -335,6 +342,7 @@ pub struct FrameIterator<R> {
     offset: u64,
     stats: ParseStats,
     skip_tracking: SkipTracking,
+    max_frame_len: usize,
 }
 
 impl<R: Read> FrameIterator<R> {
@@ -348,7 +356,15 @@ impl<R: Read> FrameIterator<R> {
             offset: 0,
             stats: ParseStats::default(),
             skip_tracking: SkipTracking::CountOnly,
+            max_frame_len: DEFAULT_MAX_FRAME_LEN,
         }
+    }
+
+    /// Most bytes buffered while looking for one frame's start or end;
+    /// defaults to [`DEFAULT_MAX_FRAME_LEN`].
+    pub fn max_frame_len(mut self, len: usize) -> Self {
+        self.max_frame_len = len;
+        self
     }
 
     /// Enable capturing of skipped bytes (shorthand for
@@ -1582,5 +1598,121 @@ mod tests {
             .unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].content, b"hello");
+    }
+
+    const TEST_BOUND: usize = 256 * 1024;
+    const FLOOD_LEN: usize = 4 * 1024 * 1024;
+    const FRAME_HELLO: &[u8] =
+        b"recv 5 bytes from tcp/1.1.1.1:5060 at 00:00:00.000000:\nhello\x0B\n";
+    const FRAME_BAR: &[u8] = b"sent 3 bytes to tcp/3.3.3.3:5060 at 02:00:00.000000:\nbar\x0B\n";
+
+    /// `len` bytes of CSV rows ending each row with `eol`: input that holds
+    /// no frame header and, with `eol` other than `\n`, no newline either.
+    fn csv_flood(len: usize, eol: u8) -> Vec<u8> {
+        let row = b"2026-11-23 10:00:00,42,alpha,beta,\"quoted, field\"";
+        let mut data = Vec::with_capacity(len + row.len() + 1);
+        while data.len() < len {
+            data.extend_from_slice(row);
+            data.push(eol);
+        }
+        data.truncate(len);
+        data
+    }
+
+    /// Capacity never shrinks, so it bounds the peak the buffer reached.
+    fn assert_buffer_bounded<R: Read>(iter: &FrameIterator<R>) {
+        assert!(
+            iter.buf.capacity() <= 2 * (TEST_BOUND + READ_BUF_SIZE),
+            "buffer grew to {} bytes against a {TEST_BOUND} byte bound",
+            iter.buf.capacity()
+        );
+    }
+
+    fn bounded(data: &[u8]) -> FrameIterator<&[u8]> {
+        FrameIterator::new(data)
+            .max_frame_len(TEST_BOUND)
+            .skip_tracking(SkipTracking::TrackRegions)
+    }
+
+    fn assert_one_oversized_region(stats: &ParseStats, offset: u64, length: u64) {
+        assert_eq!(stats.bytes_skipped, length);
+        assert_eq!(
+            stats.unparsed_regions.len(),
+            1,
+            "{:?}",
+            stats.unparsed_regions
+        );
+        let region = &stats.unparsed_regions[0];
+        assert_eq!(region.reason, SkipReason::OversizedFrame);
+        assert_eq!((region.offset, region.length), (offset, length));
+    }
+
+    #[test]
+    fn headerless_input_stays_bounded() {
+        let data = csv_flood(FLOOD_LEN, b'\n');
+        let mut iter = bounded(&data);
+        assert!(iter.next().is_none());
+        assert_buffer_bounded(&iter);
+        assert_eq!(iter.stats().bytes_read, data.len() as u64);
+        assert_one_oversized_region(iter.stats(), 0, data.len() as u64);
+    }
+
+    #[test]
+    fn content_without_boundary_is_dropped_and_parsing_resumes() {
+        let mut data = FRAME_HELLO.to_vec();
+        data.extend_from_slice(b"recv 100 bytes from tcp/1.1.1.1:5060 at 00:00:01.000000:\n");
+        data.extend_from_slice(&csv_flood(FLOOD_LEN, b'\n'));
+        data.extend_from_slice(b"\x0B\n");
+        let resume_at = data.len();
+        data.extend_from_slice(FRAME_BAR);
+        data.extend_from_slice(FRAME_BAR);
+
+        let mut iter = bounded(&data);
+        let frames: Vec<Frame> = iter.by_ref().collect::<Result<_, _>>().unwrap();
+        let contents: Vec<&[u8]> = frames.iter().map(|f| f.content.as_slice()).collect();
+        assert_eq!(contents, [&b"hello"[..], b"bar", b"bar"]);
+        assert_eq!(frames[1].offset, resume_at as u64);
+        assert_buffer_bounded(&iter);
+        let dropped = resume_at - FRAME_HELLO.len();
+        assert_one_oversized_region(iter.stats(), FRAME_HELLO.len() as u64, dropped as u64);
+    }
+
+    #[test]
+    fn header_without_newline_stays_bounded() {
+        let mut data = FRAME_HELLO.to_vec();
+        data.extend_from_slice(b"recv 10 bytes ");
+        data.extend_from_slice(&csv_flood(FLOOD_LEN, b';'));
+        data.extend_from_slice(b"\x0B\n");
+        let resume_at = data.len();
+        data.extend_from_slice(FRAME_BAR);
+
+        let mut iter = bounded(&data);
+        let frames: Vec<Frame> = iter.by_ref().collect::<Result<_, _>>().unwrap();
+        let contents: Vec<&[u8]> = frames.iter().map(|f| f.content.as_slice()).collect();
+        assert_eq!(contents, [&b"hello"[..], b"bar"]);
+        assert_buffer_bounded(&iter);
+        let dropped = resume_at - FRAME_HELLO.len();
+        assert_one_oversized_region(iter.stats(), FRAME_HELLO.len() as u64, dropped as u64);
+    }
+
+    /// A boundary whose header is still arriving when the bound forces a
+    /// discard survives it: the discard keeps the tail that can start one.
+    #[test]
+    fn boundary_straddling_discard_is_found() {
+        // Reads are READ_BUF_SIZE each, so the first discard happens once
+        // the buffer passes the bound at a read boundary.
+        let discard_at = (TEST_BOUND / READ_BUF_SIZE + 1) * READ_BUF_SIZE;
+        for split in [1, 2, 10, 23] {
+            let mut data = csv_flood(discard_at - split, b'\n');
+            data.extend_from_slice(b"\x0B\n");
+            let resume_at = data.len();
+            data.extend_from_slice(FRAME_BAR);
+
+            let mut iter = bounded(&data);
+            let frames: Vec<Frame> = iter.by_ref().collect::<Result<_, _>>().unwrap();
+            assert_eq!(frames.len(), 1, "boundary {split} bytes before the discard");
+            assert_eq!(frames[0].content, b"bar");
+            assert_one_oversized_region(iter.stats(), 0, resume_at as u64);
+        }
     }
 }

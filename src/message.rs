@@ -44,6 +44,7 @@ pub struct MessageIterator<R> {
     ready: VecDeque<SipMessage>,
     exhausted: bool,
     clock: StaleClock,
+    max_message_len: Option<usize>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -70,7 +71,22 @@ impl<R: std::io::Read> MessageIterator<R> {
             ready: VecDeque::new(),
             exhausted: false,
             clock: StaleClock::new(),
+            max_message_len: None,
         }
+    }
+
+    /// Bound on one frame, see [`FrameIterator::max_frame_len`].
+    pub fn max_frame_len(mut self, len: usize) -> Self {
+        self.frames = self.frames.max_frame_len(len);
+        self
+    }
+
+    /// Most bytes one TCP connection may hold while its message is still
+    /// arriving; past it the pending bytes are dropped and counted in
+    /// [`ParseStats::oversized_buffers`]. Unbounded unless set.
+    pub fn max_message_len(mut self, len: usize) -> Self {
+        self.max_message_len = Some(len);
+        self
     }
 
     /// Enable capturing of skipped bytes in the underlying [`FrameIterator`];
@@ -1713,5 +1729,41 @@ mod tests {
             assert_eq!(contents(&msgs), [shown(&content)]);
             assert_eq!(iter.parse_stats().unusable_content_lengths(), 0);
         }
+    }
+
+    /// A connection declaring a body far past what arrives, then a complete
+    /// message: buffered as one INVITE unless the caller bounds the buffer.
+    fn oversized_then_options() -> (Vec<u8>, usize) {
+        let addr = "[2001:db8::7]:5061";
+        let head = b"INVITE sip:urn:service:sos SIP/2.0\r\nContent-Length: 100000\r\n\r\n";
+        let body = [b'x'; 600];
+        let mut first = head.to_vec();
+        first.extend_from_slice(&body);
+        let mut data = make_frame(Direction::Recv, Transport::Tcp, addr, &first);
+        data.extend_from_slice(&make_frame(Direction::Recv, Transport::Tcp, addr, &body));
+        let options = b"OPTIONS sip:psap@example.com SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        data.extend_from_slice(&make_frame(Direction::Recv, Transport::Tcp, addr, options));
+        (data, first.len() + body.len())
+    }
+
+    #[test]
+    fn oversized_connection_buffer_is_dropped() {
+        let (data, dropped) = oversized_then_options();
+        let mut iter = MessageIterator::new(&data[..]).max_message_len(1024);
+        let msgs = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].content.starts_with(b"OPTIONS "));
+        assert_eq!(iter.parse_stats().oversized_buffers(), 1);
+        assert_eq!(iter.parse_stats().oversized_buffer_bytes(), dropped as u64);
+    }
+
+    #[test]
+    fn connection_buffer_unbounded_by_default() {
+        let (data, _) = oversized_then_options();
+        let mut iter = MessageIterator::new(&data[..]);
+        let msgs = iter.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].content.starts_with(b"INVITE "));
+        assert_eq!(iter.parse_stats().oversized_buffers(), 0);
     }
 }
