@@ -191,10 +191,13 @@ The six reasons evolved from production observations:
   new file starts with the tail of whatever frame was being written. This is
   expected and benign. Capped at the largest IP datagram plus its boundary.
 
-- **OversizedFrame** — A skip larger than that cap, wherever it occurs.
-  Indicates the input isn't a dump file (compressed data, binary garbage).
-  The same cap bounds how far a declared byte count may run past the
-  buffered bytes before boundary scanning takes over.
+- **OversizedFrame** — A skip larger than that cap, wherever it occurs,
+  or a frame whose start, boundary or header line was not found within
+  the per-frame memory bound. Indicates the input isn't a dump file
+  (compressed data, binary garbage, a stray log or CSV). One oversized
+  run is one region, however many pieces it was skipped in. The same cap
+  bounds how far a declared byte count may run past the buffered bytes
+  before boundary scanning takes over.
 
 - **ReplayedFrame** — Logrotate's `copytruncate` creates a race: the
   frame being written when the file is rotated appears partially in both
@@ -325,15 +328,24 @@ Rules that emerged from production use:
   returned error or a parse-statistics count, so the library logs a
   counted loss at info or below.
 
-## Memory Profile
+## Every Buffer Has a Caller-Visible Bound
 
-The parser processes arbitrarily large inputs with constant memory.
-This was validated with jemalloc heap profiling and gdb inspection
-during processing of 50+ chained dump files:
+No input, a stray non-dump file included, grows memory past a bound the
+caller can see and set; past it the parser skips and counts rather than
+grows, since an allocation failure aborts the process instead of
+returning.
 
-- `FrameIterator::buf` — 64KB capacity, ~200 bytes typical usage
-- `MessageIterator::buffers` — 0 entries at steady state (evicted after extraction)
-- `MessageIterator::ready` — 0 entries, capacity 10 (drained each iteration)
+Level 1 holds at most one frame plus one read. Its default clears the
+largest frame sofia writes: one message on send, one socket read on
+receive, which the kernel's receive buffer bounds rather than sofia.
+
+Level 2's per-connection bound has no library default: what a
+reassembled message may weigh is the caller's memory budget, not a
+property of the format. Past it the connection's pending bytes are
+dropped and counted apart from stale evictions.
+
+Captured skip data is not bounded: a caller asking for the bytes owns
+their cost.
 
 One production pitfall: using `Read::chain()` to concatenate 50+ XZ
 files upfront keeps all LZMA decoder state alive simultaneously (172MB).
